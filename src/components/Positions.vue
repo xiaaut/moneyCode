@@ -1,0 +1,1 @@
+现在我希望你能把持仓股票也抽象到components文件夹下的positions.vue文件里
