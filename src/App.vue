@@ -27,7 +27,7 @@
               <el-button type="warning" :loading="refreshingFundamental" @click="refreshFundamentals">刷新 PE/ROE（财报）</el-button>
             </div>
 
-            <el-table :data="tableData" border style="width: 100%" :cell-class-name="tableCellClassName" show-summary :summary-method="getSummaries" size="small">
+            <el-table :data="tableData" border style="width: 100%" :cell-class-name="tableCellClassName" :row-class-name="tableRowClassName" show-summary :summary-method="getSummaries" size="small">
               <el-table-column type="index" label="序号" width="60" align="center" />
               <el-table-column prop="code" label="股票代码" width="100" align="center" />
               <el-table-column prop="name" label="股票名称" width="120" align="center" />
@@ -43,6 +43,12 @@
               <el-table-column prop="pb" label="PB" width="80" align="right" />
               <el-table-column prop="pe" label="PE (TTM)" width="100" align="right" />
               <el-table-column prop="roe" label="ROE (加权)" width="120" align="right" />
+              <el-table-column prop="avgPe" label="平均pe" width="90" align="right" />
+              <el-table-column prop="eps" label="eps" width="90" align="right" />
+              <el-table-column prop="eps3y" label="eps（3年）" width="110" align="right" />
+              <el-table-column prop="g" label="g" width="80" align="right" />
+              <el-table-column prop="peg" label="peg" width="80" align="right" />
+              <el-table-column prop="expectedReturn" label="预估收益率" width="110" align="right" />
 
               <el-table-column label="操作" width="140" fixed="right" align="center">
                 <template #default="scope">
@@ -178,6 +184,15 @@
         <el-form-item label="持仓数量">
           <el-input-number v-model="editForm.quantity" :min="0" :step="10" />
         </el-form-item>
+        <el-form-item label="平均pe">
+          <el-input v-model.trim="editForm.avgPe" />
+        </el-form-item>
+        <el-form-item label="eps">
+          <el-input v-model.trim="editForm.eps" />
+        </el-form-item>
+        <el-form-item label="eps（3年）">
+          <el-input v-model.trim="editForm.eps3y" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editDialogVisible = false">取消</el-button>
@@ -212,6 +227,12 @@ const defaultTableData = [
     pb: 5.47,
     pe: 31.57,
     roe: '15.46%',
+    avgPe: '-',
+    eps: '-',
+    eps3y: '-',
+    g: '-',
+    peg: '-',
+    expectedReturn: '-',
   },
   {
     id: 2,
@@ -229,6 +250,12 @@ const defaultTableData = [
     pb: 3.07,
     pe: 23.92,
     roe: '9.90%',
+    avgPe: '-',
+    eps: '-',
+    eps3y: '-',
+    g: '-',
+    peg: '-',
+    expectedReturn: '-',
   },
   {
     id: 4,
@@ -246,6 +273,12 @@ const defaultTableData = [
     pb: 1.69,
     pe: 18.77,
     roe: '7.58%',
+    avgPe: '-',
+    eps: '-',
+    eps3y: '-',
+    g: '-',
+    peg: '-',
+    expectedReturn: '-',
   },
   {
     id: 7,
@@ -263,6 +296,12 @@ const defaultTableData = [
     pb: 1.28,
     pe: '亏损',
     roe: '0.43%',
+    avgPe: '-',
+    eps: '-',
+    eps3y: '-',
+    g: '-',
+    peg: '-',
+    expectedReturn: '-',
   },
   {
     id: 10,
@@ -280,6 +319,12 @@ const defaultTableData = [
     pb: 3.06,
     pe: 18.14,
     roe: '12.14%',
+    avgPe: '-',
+    eps: '-',
+    eps3y: '-',
+    g: '-',
+    peg: '-',
+    expectedReturn: '-',
   },
 ];
 
@@ -311,7 +356,16 @@ const pieTipSector = ref({ visible: false, x: 0, y: 0, text: '' });
 const pieTipStock = ref({ visible: false, x: 0, y: 0, text: '' });
 
 const addForm = ref({ code: '', costPrice: 0, quantity: 0 });
-const editForm = ref({ id: 0, code: '', name: '', costPrice: 0, quantity: 0 });
+const editForm = ref({
+  id: 0,
+  code: '',
+  name: '',
+  costPrice: 0,
+  quantity: 0,
+  avgPe: '-',
+  eps: '-',
+  eps3y: '-',
+});
 
 const redColumnsWhenProfitPositive = new Set(['code', 'name', 'sector', 'costPrice', 'quantity', 'currentPrice', 'totalCost', 'marketValue', 'profitAmount', 'profitRatio', 'positionRatio']);
 
@@ -322,12 +376,29 @@ const tableCellClassName = ({ row, column }) => {
   return '';
 };
 
+const tableRowClassName = ({ row }) => {
+  const gText = String(row.g || '')
+    .replace('%', '')
+    .trim();
+  const rText = String(row.expectedReturn || '')
+    .replace('%', '')
+    .trim();
+  const gNum = Number(gText);
+  const rNum = Number(rText);
+  if ((Number.isFinite(gNum) && gNum < 10) || (Number.isFinite(rNum) && rNum <= 0)) {
+    return 'risk-row';
+  }
+  return '';
+};
+
 const formatMoney = n => Number(n).toFixed(2);
 const formatPercent = n => `${n.toFixed(2)}%`;
 const formatThreeDecimalCell = (_, __, value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num.toFixed(3) : value;
 };
+const STRATEGY_EPS_YEARS = 3;
+const STRATEGY_HOLD_YEARS = 3;
 const piePalette = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#14b8a6', '#f97316', '#64748b', '#ec4899', '#06b6d4'];
 
 const totalMarketValueNum = computed(() => tableData.value.reduce((sum, row) => sum + (Number(row.marketValue) || 0), 0));
@@ -477,6 +548,40 @@ function recalcRow(row) {
   row.profitRatio = formatPercent(profitRatio);
 }
 
+function toNumberOrNull(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function recalcStrategyMetrics(row) {
+  const peTtm = toNumberOrNull(row.pe);
+  const avgPe = toNumberOrNull(row.avgPe);
+  const eps = toNumberOrNull(row.eps);
+  const eps3y = toNumberOrNull(row.eps3y);
+
+  let gDecimal = null;
+  if (eps !== null && eps3y !== null && eps > 0 && eps3y > 0) {
+    gDecimal = Math.pow(eps3y / eps, 1 / STRATEGY_EPS_YEARS) - 1;
+    row.g = `${(gDecimal * 100).toFixed(2)}%`;
+  } else {
+    row.g = '-';
+  }
+
+  const gPercent = gDecimal === null ? null : gDecimal * 100;
+  if (peTtm !== null && peTtm > 0 && gPercent !== null && gPercent > 0) {
+    row.peg = (peTtm / gPercent).toFixed(2);
+  } else {
+    row.peg = '-';
+  }
+
+  if (peTtm !== null && peTtm > 0 && avgPe !== null && avgPe > 0 && gDecimal !== null && gDecimal > -1) {
+    const annualizedReturn = Math.pow(avgPe / peTtm, 1 / STRATEGY_HOLD_YEARS) * (1 + gDecimal) - 1;
+    row.expectedReturn = `${(annualizedReturn * 100).toFixed(2)}%`;
+  } else {
+    row.expectedReturn = '-';
+  }
+}
+
 function recalcAllPositionRatios() {
   const totalMarketValue = tableData.value.reduce((sum, row) => sum + (Number(row.marketValue) || 0), 0);
   tableData.value.forEach(row => {
@@ -486,7 +591,13 @@ function recalcAllPositionRatios() {
 }
 
 function refreshDerivedFields(shouldSave = true) {
-  tableData.value.forEach(row => recalcRow(row));
+  tableData.value.forEach(row => {
+    if (row.avgPe === undefined || row.avgPe === null || row.avgPe === '') row.avgPe = '-';
+    if (row.eps === undefined || row.eps === null || row.eps === '') row.eps = '-';
+    if (row.eps3y === undefined || row.eps3y === null || row.eps3y === '') row.eps3y = '-';
+    recalcStrategyMetrics(row);
+    recalcRow(row);
+  });
   recalcAllPositionRatios();
   if (shouldSave) {
     void saveTableData();
@@ -624,6 +735,14 @@ async function refreshCurrentPrices() {
       const pureCode = parseCode(row.code)?.pureCode;
       const quote = pureCode ? quoteMap.get(pureCode) : null;
       if (!quote) return;
+
+      // 绿色按钮同步刷新 PE(TTM)：与现价同源于行情接口
+      if (Number.isFinite(Number(quote.f115))) {
+        row.pe = Number(Number(quote.f115).toFixed(2));
+      } else {
+        row.pe = '亏损';
+      }
+
       const price = getPriceFromQuoteItem(quote);
       if (price === null) return;
       row.currentPrice = price;
@@ -648,17 +767,22 @@ async function refreshFundamentals() {
 
   refreshingFundamental.value = true;
   try {
-    const quoteMap = await fetchQuoteByCodes(tableData.value);
+    // 如果不再需要 PE，其实连 fetchQuoteByCodes 都可以优化掉，但为了保持结构简单，这里仅注释 PE 更新逻辑
+    // const quoteMap = await fetchQuoteByCodes(tableData.value);
     let updatedCount = 0;
     for (const row of tableData.value) {
-      const pureCode = parseCode(row.code)?.pureCode;
-      const quote = pureCode ? quoteMap.get(pureCode) : null;
-      const pe = quote && Number.isFinite(Number(quote.f115)) ? Number(Number(quote.f115).toFixed(2)) : null;
-      if (pe !== null) row.pe = pe;
+      // const pureCode = parseCode(row.code)?.pureCode;
+      // const quote = pureCode ? quoteMap.get(pureCode) : null;
+      // const pe = quote && Number.isFinite(Number(quote.f115)) ? Number(Number(quote.f115).toFixed(2)) : null;
+      // if (pe !== null) row.pe = pe;
 
       const roe = await fetchRoeByCode(row.code);
-      if (roe !== null) row.roe = roe;
-      if (roe !== null || pe !== null) updatedCount += 1;
+      // if (roe !== null) row.roe = roe;
+      // if (roe !== null || pe !== null) updatedCount += 1;
+      if (roe !== null) {
+        row.roe = roe;
+        updatedCount += 1; // ✅ 只有当 ROE 成功更新时才计数
+      }
     }
 
     refreshDerivedFields();
@@ -724,6 +848,9 @@ async function confirmAdd() {
       pb,
       pe,
       roe,
+      avgPe: '-',
+      eps: '-',
+      eps3y: '-',
     });
 
     refreshDerivedFields();
@@ -744,6 +871,9 @@ function openEditDialog(row) {
     name: row.name,
     costPrice: Number(row.costPrice) || 0,
     quantity: Number(row.quantity) || 0,
+    avgPe: String(row.avgPe ?? '-'),
+    eps: String(row.eps ?? '-'),
+    eps3y: String(row.eps3y ?? '-'),
   };
   editDialogVisible.value = true;
 }
@@ -753,6 +883,9 @@ function confirmEdit() {
   if (idx < 0) return;
   tableData.value[idx].costPrice = Number(editForm.value.costPrice) || 0;
   tableData.value[idx].quantity = Number(editForm.value.quantity) || 0;
+  tableData.value[idx].avgPe = String(editForm.value.avgPe || '').trim() || '-';
+  tableData.value[idx].eps = String(editForm.value.eps || '').trim() || '-';
+  tableData.value[idx].eps3y = String(editForm.value.eps3y || '').trim() || '-';
   refreshDerivedFields();
   editDialogVisible.value = false;
   ElMessage.success('修改成功');
@@ -1105,6 +1238,10 @@ onMounted(() => {
 
 :deep(.el-table .profit-positive-cell) {
   color: #f56c6c;
+}
+
+:deep(.el-table .risk-row td.el-table__cell) {
+  background-color: #fff7d6 !important;
 }
 
 :deep(.el-table th.el-table__cell) {
