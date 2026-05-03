@@ -40,12 +40,12 @@
     "pe": 20.39,
     "roe": "3.48%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "26.02",
+    "g": "15.88%",
+    "peg": "1.28",
+    "expectedReturn": "25.69%",
+    "eps": "1.78",
+    "eps3y": "2.77"
   },
   {
     "id": 4,
@@ -64,12 +64,12 @@
     "pe": 18.9,
     "roe": "3.07%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "25.60",
+    "g": "5.20%",
+    "peg": "3.64",
+    "expectedReturn": "16.39%",
+    "eps": "0.67",
+    "eps3y": "0.78"
   },
   {
     "id": 7,
@@ -88,12 +88,12 @@
     "pe": 194.29,
     "roe": "0.20%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "125.06",
+    "g": "209.99%",
+    "peg": "0.93",
+    "expectedReturn": "167.65%",
+    "eps": "0.0047",
+    "eps3y": "0.14"
   },
   {
     "id": 10,
@@ -112,12 +112,12 @@
     "pe": 20.02,
     "roe": "4.31%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "29.95",
+    "g": "14.19%",
+    "peg": "1.41",
+    "expectedReturn": "30.60%",
+    "eps": "2.7",
+    "eps3y": "4.02"
   },
   {
     "id": 11,
@@ -136,12 +136,12 @@
     "pe": 14.37,
     "roe": "9.44%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "20.75",
+    "g": "7.60%",
+    "peg": "1.89",
+    "expectedReturn": "21.62%",
+    "eps": "1.83",
+    "eps3y": "2.28"
   },
   {
     "id": 12,
@@ -160,12 +160,12 @@
     "pe": 18.01,
     "roe": "4.96%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "19.68",
+    "g": "8.49%",
+    "peg": "2.12",
+    "expectedReturn": "11.74%",
+    "eps": "2.89",
+    "eps3y": "3.69"
   },
   {
     "id": 13,
@@ -184,12 +184,12 @@
     "pe": 25.4,
     "roe": "1.26%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "28.02",
+    "g": "41.16%",
+    "peg": "0.62",
+    "expectedReturn": "45.85%",
+    "eps": "0.16",
+    "eps3y": "0.45"
   },
   {
     "id": 14,
@@ -232,12 +232,12 @@
     "pe": 14.81,
     "roe": "7.32%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "26.64",
+    "g": "2.13%",
+    "peg": "6.96",
+    "expectedReturn": "24.21%",
+    "eps": "7.36",
+    "eps3y": "7.84"
   },
   {
     "id": 16,
@@ -256,7 +256,7 @@
     "pe": 27.99,
     "roe": "2.36%",
     "currentPe": "-",
-    "avgPe": "-",
+    "avgPe": "39.81",
     "g": "-",
     "peg": "-",
     "expectedReturn": "-",
@@ -280,12 +280,12 @@
     "pe": 18.9,
     "roe": "3.07%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "25.6",
+    "g": "5.20%",
+    "peg": "3.64",
+    "expectedReturn": "16.39%",
+    "eps": "0.67",
+    "eps3y": "0.78"
   },
   {
     "id": 18,
@@ -304,12 +304,12 @@
     "pe": 35.32,
     "roe": "3.40%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "35.44",
+    "g": "14.62%",
+    "peg": "2.42",
+    "expectedReturn": "14.75%",
+    "eps": "0.87",
+    "eps3y": "1.31"
   },
   {
     "id": 19,
@@ -328,12 +328,12 @@
     "pe": 76.85,
     "roe": "1.86%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "49.4",
+    "g": "72.03%",
+    "peg": "1.07",
+    "expectedReturn": "48.47%",
+    "eps": "0.22",
+    "eps3y": "1.12"
   },
   {
     "id": 20,
@@ -352,12 +352,12 @@
     "pe": 28.99,
     "roe": "1.07%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "42.17",
+    "g": "12.35%",
+    "peg": "2.35",
+    "expectedReturn": "27.30%",
+    "eps": "0.55",
+    "eps3y": "0.78"
   },
   {
     "id": 21,
@@ -376,12 +376,12 @@
     "pe": 14.34,
     "roe": "5.80%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
+    "avgPe": "23.05",
+    "g": "-10.44%",
     "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "expectedReturn": "4.91%",
+    "eps": "2.77",
+    "eps3y": "1.99"
   },
   {
     "id": 22,
@@ -400,12 +400,12 @@
     "pe": 12.5,
     "roe": "4.61%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "13.22",
+    "g": "6.30%",
+    "peg": "1.98",
+    "expectedReturn": "8.30%",
+    "eps": "1.84",
+    "eps3y": "2.21"
   },
   {
     "id": 23,
@@ -424,12 +424,12 @@
     "pe": 18.54,
     "roe": "2.40%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "24.73",
+    "g": "12.48%",
+    "peg": "1.49",
+    "expectedReturn": "23.82%",
+    "eps": "1.04",
+    "eps3y": "1.48"
   },
   {
     "id": 24,
@@ -448,12 +448,12 @@
     "pe": 14.37,
     "roe": "9.44%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "20.75",
+    "g": "7.60%",
+    "peg": "1.89",
+    "expectedReturn": "21.62%",
+    "eps": "1.83",
+    "eps3y": "2.28"
   },
   {
     "id": 25,
@@ -496,12 +496,12 @@
     "pe": 19,
     "roe": "4.73%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "22.11",
+    "g": "14.75%",
+    "peg": "1.29",
+    "expectedReturn": "20.70%",
+    "eps": "1.35",
+    "eps3y": "2.04"
   },
   {
     "id": 27,
@@ -520,12 +520,12 @@
     "pe": 14.59,
     "roe": "8.03%",
     "currentPe": "-",
-    "avgPe": "-",
-    "g": "-",
-    "peg": "-",
-    "expectedReturn": "-",
-    "eps": "-",
-    "eps3y": "-"
+    "avgPe": "23.39",
+    "g": "6.15%",
+    "peg": "2.37",
+    "expectedReturn": "24.24%",
+    "eps": "2.09",
+    "eps3y": "2.50"
   },
   {
     "id": 28,
