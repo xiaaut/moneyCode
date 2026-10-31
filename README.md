@@ -1,42 +1,100 @@
-# .
+# 投资面板（moneyCode）
 
-This template should help get you started developing with Vue 3 in Vite.
+个人用的 A 股持仓管理 + 价值选股面板。前端是 Vue 3 + Vite + Element Plus，
+行情与财报数据实时抓取东方财富公开接口，持仓 / 观察列表落在本地 JSON 文件里，
+不需要单独的后端服务。
 
-## Recommended IDE Setup
+## 功能
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
+- **持仓股票**：表格维护持仓（成本价、数量、现价、市值、盈亏、仓位占比），
+  并显示 PB / PE(TTM) / ROE / 平均 PE / EPS / 3 年 EPS / g / PEG / 预估收益率；
+  下方按板块汇总仓位，配两个手绘 SVG 甜甜圈图（板块占比、个股 Top10）。
+- **批量导入**：从同花顺 / 券商客户端把「持仓」表格（含表头）复制粘贴进来，
+  自动识别代码 / 数量 / 成本价，支持「按代码合并」或「整体覆盖」两种方式，
+  导入后自动补齐名称、板块、现价、PE。
+- **MSCI 数据**：上传 TXT / Excel 成分股清单（含表头），自动联网拉取每只股票的
+  PE(TTM) / ROE / 行业分类，按细分行业分组计算「PE 名次 + ROE 名次（ROE 越高越好）」排名，
+  结果保存到 `data/msci.json`，可随时点「重新获取 PE / ROE」增量刷新。
+- **国资控股（全市场）**：一键扫描沪深主板 + 北交所全部 A 股（自动排除创业板、科创板、ST / 退市），
+  综合东方财富数据中心、国资委央企名录、同花顺 F10 穿透，输出 国务院国资委 / 地方国资委 /
+  政府财政 / 国有资本运营 分类，带进度条和「更新数据」按钮，结果存 `data/state-owned.json`。
+- **选股策略**：Davis 双因子选股器。输入 EPS / PE 后实时计算 g、PEG、年化收益率，
+  按 6 条条件打分，可一键加入观察列表。
+- **观察列表**：保存每次策略测算的快照，可删除单条或清空。
+- 待调仓股票、分析报告：占位页，尚未实现。
 
-## Recommended Browser Setup
+## 策略公式
 
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Type Support for `.vue` Imports in TS
-
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
-pnpm install
+```
+g            = (目标EPS / 当前EPS)^(1/3) - 1
+PEG          = 当前PE / (g × 100)
+预估年化收益 = (均值PE / 当前PE)^(1/3) × (1 + g) - 1
 ```
 
-### Compile and Hot-Reload for Development
+持仓表的「预估收益率」用同一套公式批量计算：`avgPe` 对应均值 PE，
+`eps` / `eps3y` 对应当前 EPS 与 3 年后 EPS。
 
-```sh
-pnpm dev
-```
+## 数据来源
 
-### Type-Check, Compile and Minify for Production
+| 用途 | 接口 |
+| --- | --- |
+| 现价 / 名称 / 板块 / PB / PE(TTM) | 开发服务器中间件 `/api/quote` → `push2.eastmoney.com`（服务端缓存 30 秒 + 节流） |
+| ROE（加权） | 开发服务器中间件 `/api/roe?codes=SH600519,SZ000725` → 东方财富 F10（缓存 7 天 + 逐只节流） |
+| MSCI 现价 / PE(TTM) | 腾讯行情 `qt.gtimg.cn`（批量，快照存 `data/msci.json`） |
+| MSCI ROE | 东方财富数据中心「主要财务指标」`RPT_F10_FINANCE_MAINFINADATA`（取最新报告期） |
+| MSCI 行业分类 | 东方财富「公司概况」`RPT_F10_BASIC_ORGINFO` 的 EM2016（缓存 2 天） |
+| 全市场股票清单 + 实际控制人 | 东方财富数据中心 `RPT_F10_BASIC_ORGINFO`（50 页 / 约 20 秒） |
+| 上市校验 / 现价 | 腾讯行情 `qt.gtimg.cn`（批量，避开东财 push2 的频率限制） |
+| 央企集团 → 国务院国资委 | 国务院国资委官网「央企名录」（100 家，缓存 5 天） |
+| 最终控制人穿透 | 同花顺 F10 `basic.10jqka.com.cn/{code}/company.html`（仅对未归类国有法人，0.9 秒/只，缓存 30 天） |
+| 持仓 / 观察列表 | 开发服务器中间件 `/api/portfolio`、`/api/watchlist` → `data/*.json` |
 
-```sh
-pnpm build
-```
+`/api/*` 由 `vite.config.ts` 里的插件提供，**只在 `vite dev` 和 `vite preview` 下生效**；
+把 `dist` 直接放到静态服务器会失去读写 JSON 的能力。
+
+## 接口限流与缓存（防封）
+
+外部金融接口有频率风控，所以所有外部请求都收口在服务端中间件里统一处理：
+
+- **批量优先**：行情一次请求带全部 secid，ROE 一次请求带全部代码，不改成一股票一请求。
+- **TTL 缓存**：行情 30 秒、ROE 7 天（财报按季度更新），落盘到 `data/cache/`，重启不丢；
+  重复点「刷新」基本不会再打上游。
+- **节流**：两次上游调用之间强制最小间隔（行情 1s、ROE 500ms），并限制每分钟调用次数。
+- **失败退避**：上游报错时回退旧缓存并在页面提示，不会把错误直接抛给用户。
+
+## MSCI 数据
+
+- 支持 `.txt` / `.csv` / `.xlsx` / `.xls`，需要带表头（例如 `序号 / 股票代码 / 中文简称`）。
+- 导入后**自动联网分析**（约 20 秒，缓存命中约 6 秒）：
+  1. 腾讯行情批量取 **PE(TTM)**、现价、涨跌幅、总市值；
+  2. 东方财富数据中心批量取 **ROE（加权，最新定期报告）**；
+  3. 东方财富行业分类（EM2016）取细分行业作为分组（如 白酒、中药生产、证券、集成电路…）。
+- 结果落盘 `data/msci.json`，页面按行业分组展示，分组粒度可选三级细分（如白酒）/二级中类（如饮料），并可切换「按行业分组 / 全局排序」。
+- **排名规则**：组内 PE(TTM) 升序给名次（越低越靠前=1 分），ROE 降序给名次（越高越靠前=1 分），
+  两项名次相加，**合计越小越靠前**；同行业使用相同背景色便于区分；
+  PE / ROE 为负或缺失（如亏损股）按组内最差名次计分，避免亏损股排到第一。
+- 「重新获取 PE / ROE」会重新联网拉取；行情/ROE/行业均有缓存，重复点击很快。
+- 原始文件里除代码 / 名称外的列（如权重、纳入日期）会原样保留并在表格里动态展示。
+
+## 国资 / 政府控股（全市场）
+
+- **扫描范围**：沪深主板 + 北交所全部 A 股；自动排除创业板（300/301）、科创板（688/689）、
+  ST / *ST / 退市股，以及拉不到行情的历史代码。
+- **判定链路**（每一步都是真实联网数据）：
+  1. 东方财富数据中心「公司概况」全量拉取实际控制人（约 50 页 / 20 秒）；
+  2. 国务院国资委官网「央企名录」（100 家）把央企集团直接映射为「国务院国资委」；
+  3. 仍无法归类的「国有法人」再用同花顺 F10「最终控制人」穿透（0.9 秒/只，缓存 30 天）；
+  4. 腾讯行情批量校验上市状态并取现价（避开东财 push2 的频率限制）。
+- **实测结果**：3480 只，其中国资 / 政府控股 1192 只（国务院国资委 355、地方国资委 641、
+  政府 / 财政 / 事业单位 181、国有资本运营主体 15）；待确认 55 只。首次扫描约 80 秒。
+- **更新按钮**：增量更新约 1~2 分钟（命中缓存）；勾选「强制全量刷新」重新穿透约 5~8 分钟。
+- **分类口径**：国务院国资委 / 地方国资委 / 政府·财政·事业单位 / 国有资本运营主体 /
+  国有法人（待确认）/ 集体所有制 / 非国资（自然人）/ 无实际控制人 / 未获取。
+- **局限**：控制关系以上市公司定期报告披露为准，可能有滞后；
+  「国有法人（待确认）」是数据源只披露到集团层面、且不在央企名录中的情况
+  （例如部分地方国资集团、中央金融企业子公司），建议人工核对后再使用。
+
+## 注意
+
+`data/` 里是真实持仓（股票代码、成本价、数量、盈亏）。当前仓库是私有仓库，
+不要改成公开仓库，也不要把数据文件贴到外部。

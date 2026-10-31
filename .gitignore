@@ -8,6 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.pnpm-store
 .DS_Store
 dist
 dist-ssr
@@ -37,3 +38,6 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# 行情 / 财报缓存（可随时重建，不入库）
+data/cache

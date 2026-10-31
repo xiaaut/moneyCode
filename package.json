@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "element-plus": "^2.13.7",
-    "vue": "^3.5.32"
+    "vue": "^3.5.32",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tsconfig/node24": "^24.0.4",
