@@ -17,6 +17,7 @@ const WATCHLIST_FILE = path.resolve(DATA_DIR, 'watchlist.json');
 const MSCI_FILE = path.resolve(DATA_DIR, 'msci.json');
 const STATE_OWNED_FILE = path.resolve(DATA_DIR, 'state-owned.json');
 const CLOSED_POSITIONS_FILE = path.resolve(DATA_DIR, 'closed-positions.json');
+const GRID_STRATEGIES_FILE = path.resolve(DATA_DIR, 'grid-strategies.json');
 const CACHE_DIR = path.resolve(DATA_DIR, 'cache');
 const QUOTE_CACHE_FILE = path.resolve(CACHE_DIR, 'quote.json');
 const ROE_CACHE_FILE = path.resolve(CACHE_DIR, 'roe.json');
@@ -36,6 +37,7 @@ const STATE_OWNED_ROUTE = '/api/state-owned';
 const STATE_OWNED_START_ROUTE = '/api/state-owned/start';
 const STATE_OWNED_PROGRESS_ROUTE = '/api/state-owned/progress';
 const CLOSED_POSITIONS_ROUTE = '/api/closed-positions';
+const GRID_ROUTE = '/api/grid';
 const STOCK_NAME_ROUTE = '/api/stock-name';
 
 // 现价 30 秒内复用；ROE 一周；实际控制人 30 天（变动很少）
@@ -124,6 +126,26 @@ function sendJson(res: any, status: number, payload: any) {
   res.end(JSON.stringify(payload));
 }
 
+// ---------------- JSON 读写（统一去 BOM） ----------------
+// Windows 记事本 / Excel 导出的 UTF-8 文件常带 BOM，直接 JSON.parse 会抛 Unexpected token。
+
+function stripBom(text: string): string {
+  return text.replace(/^\uFEFF/, '');
+}
+
+async function readJsonFile(file: string): Promise<any> {
+  const raw = await fs.readFile(file, 'utf-8');
+  return JSON.parse(stripBom(raw));
+}
+
+async function readJsonFileSafe<T>(file: string, fallback: T): Promise<T> {
+  try {
+    return (await readJsonFile(file)) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 // ---------------- 缓存（内存 + data/cache/*.json 落盘，重启不丢） ----------------
 
 type CacheStore = { file: string; data: CacheFile | null; loading: Promise<void> | null };
@@ -144,8 +166,7 @@ async function ensureCacheLoaded(name: string): Promise<CacheFile> {
   if (!store.loading) {
     store.loading = (async () => {
       try {
-        const raw = await fs.readFile(store.file, 'utf-8');
-        const parsed = JSON.parse(raw);
+        const parsed = await readJsonFile(store.file);
         store.data = parsed && typeof parsed === 'object' ? parsed : {};
       } catch {
         store.data = {};
@@ -756,8 +777,7 @@ function secidOf(code: string): string {
 
 async function readMsciData() {
   try {
-    const raw = await fs.readFile(MSCI_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonFile(MSCI_FILE);
     return {
       fileName: String(parsed?.fileName || ''),
       importedAt: parsed?.importedAt || null,
@@ -844,8 +864,7 @@ function matchCentralSoe(raw: string, names: string[]): string {
 
 async function loadCentralSoeNames(): Promise<string[]> {
   try {
-    const raw = await fs.readFile(CENTRAL_SOE_CACHE_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonFile(CENTRAL_SOE_CACHE_FILE);
     if (Array.isArray(parsed?.names) && parsed.names.length && Date.now() - Number(parsed.fetchedAt || 0) < CENTRAL_SOE_TTL_MS) {
       return parsed.names.map(String);
     }
@@ -1019,8 +1038,7 @@ let stateOwnedJob: StateOwnedJobState = {
 
 async function readStateOwnedData() {
   try {
-    const raw = await fs.readFile(STATE_OWNED_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonFile(STATE_OWNED_FILE);
     return {
       updatedAt: parsed?.updatedAt || null,
       total: Number(parsed?.total) || 0,
@@ -1267,8 +1285,7 @@ let orgInfoCache: { fetchedAt: number; map: Record<string, { name: string; indus
 async function loadOrgInfoMap(): Promise<Record<string, { name: string; industry: string }>> {
   if (orgInfoCache && Date.now() - orgInfoCache.fetchedAt < ORG_INFO_CACHE_TTL_MS) return orgInfoCache.map;
   try {
-    const raw = await fs.readFile(ORG_INFO_CACHE_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonFile(ORG_INFO_CACHE_FILE);
     if (parsed?.map && Date.now() - Number(parsed.fetchedAt || 0) < ORG_INFO_CACHE_TTL_MS) {
       orgInfoCache = { fetchedAt: Number(parsed.fetchedAt), map: parsed.map };
       return parsed.map;
@@ -1490,6 +1507,67 @@ async function runMsciAnalyzeJob() {
   }
 }
 
+// ---------------- 网格策略（data/grid-strategies.json） ----------------
+
+function formatLocalTimestamp(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}:${pad(date.getSeconds())}`;
+}
+
+function normalizeGridTrade(row: any, fallbackId: string) {
+  const toNumber = (value: any, fallback: number) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+  };
+  const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+
+  return {
+    id: String(row?.id || fallbackId),
+    timestamp: String(row?.timestamp || formatLocalTimestamp()),
+    type: row?.type === 'sell' ? 'sell' : 'buy',
+    price: round2(toNumber(row?.price, 0)),
+    shares: Math.max(0, Math.round(toNumber(row?.shares, 0))),
+    fee: round2(toNumber(row?.fee, 0)),
+    realizedProfit: round2(toNumber(row?.realizedProfit, 0)),
+  };
+}
+
+function normalizeGridStrategy(row: any, fallbackId: string) {
+  const toNumber = (value: any, fallback: number) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+  };
+  const now = new Date().toISOString();
+  const gridCount = Math.round(toNumber(row?.gridCount, 0));
+  const trades = Array.isArray(row?.trades)
+    ? row.trades.slice(0, 500).map((trade: any, index: number) => normalizeGridTrade(trade, `${fallbackId}_t${index + 1}`))
+    : [];
+
+  return {
+    id: String(row?.id || fallbackId),
+    symbol: String(row?.symbol ?? row?.code ?? '').trim(),
+    name: String(row?.name ?? '').trim(),
+    basePrice: toNumber(row?.basePrice, 0),
+    upperPrice: toNumber(row?.upperPrice, 0),
+    lowerPrice: toNumber(row?.lowerPrice, 0),
+    mode: row?.mode === 'geometric' ? 'geometric' : 'arithmetic',
+    gridCount: gridCount > 0 ? Math.min(gridCount, 200) : 0,
+    sharesPerGrid: Math.max(0, Math.round(toNumber(row?.sharesPerGrid, 0))),
+    initialShares: Math.max(0, Math.round(toNumber(row?.initialShares, 0))),
+    initialCost: toNumber(row?.initialCost, 0),
+    commissionRate: toNumber(row?.commissionRate, 0.0001),
+    stampDutyRate: toNumber(row?.stampDutyRate, 0.0005),
+    freeFive: Boolean(row?.freeFive),
+    lastPrice: toNumber(row?.lastPrice, 0),
+    note: String(row?.note ?? ''),
+    trades,
+    createdAt: String(row?.createdAt || now),
+    updatedAt: now,
+  };
+}
+
 function portfolioApiPlugin() {
   const portfolioRoute = '/api/portfolio';
   const watchlistRoute = '/api/watchlist';
@@ -1503,10 +1581,24 @@ function portfolioApiPlugin() {
       if (pathname === QUOTE_ROUTE) {
         if (req.method !== 'GET') return sendJson(res, 405, { message: 'Method Not Allowed' });
 
+        const parseSymbolToSecid = (raw: string) => {
+          const value = String(raw || '').trim().toUpperCase();
+          const match = value.match(/(\d{6})/);
+          if (!match) return '';
+          const code = match[1];
+          const market = value.includes('SH') || /^[659]/.test(code) ? '1' : '0';
+          return `${market}.${code}`;
+        };
         const rawSecids = String(reqUrl.searchParams.get('secids') || '');
-        const secids = Array.from(new Set(rawSecids.split(',').map(item => item.trim()).filter(Boolean)));
+        const rawSymbol = String(reqUrl.searchParams.get('symbol') || '');
+        const secids = Array.from(
+          new Set([
+            ...rawSecids.split(',').map(item => item.trim()).filter(Boolean),
+            ...rawSymbol.split(',').map(parseSymbolToSecid).filter(Boolean),
+          ]),
+        );
         if (!secids.length || secids.some(secid => !/^[01]\.\d{6}$/.test(secid))) {
-          return sendJson(res, 400, { message: 'secids 参数格式错误，应为 1.600519,0.000725' });
+          return sendJson(res, 400, { message: 'secids / symbol 参数格式错误，应为 secids=1.600519 或 symbol=600519' });
         }
 
         const result = await resolveQuotes(secids);
@@ -1562,7 +1654,7 @@ function portfolioApiPlugin() {
       if (pathname === MSCI_ROUTE && req.method === 'POST') {
         try {
           const body = await readRequestBody(req);
-          const payload = JSON.parse(body.toString('utf-8') || '{}');
+          const payload = JSON.parse(stripBom(body.toString('utf-8') || '{}'));
           const rows = Array.isArray(payload?.rows) ? payload.rows : [];
           const columns = Array.isArray(payload?.columns) ? payload.columns.map(String) : [];
           const normalized = rows
@@ -1593,7 +1685,7 @@ function portfolioApiPlugin() {
       if (pathname === MSCI_PARSE_ROUTE && req.method === 'POST') {
         try {
           const body = await readRequestBody(req);
-          const payload = JSON.parse(body.toString('utf-8') || '{}');
+          const payload = JSON.parse(stripBom(body.toString('utf-8') || '{}'));
           const fileName = String(payload?.fileName || 'import.txt');
           const base64 = String(payload?.dataBase64 || '');
           if (!base64) return sendJson(res, 400, { message: '没有收到文件内容' });
@@ -1686,7 +1778,7 @@ function portfolioApiPlugin() {
         let payload: any = {};
         try {
           const raw = (await readRequestBody(req)).toString('utf-8');
-          payload = raw ? JSON.parse(raw) : {};
+          payload = raw ? JSON.parse(stripBom(raw)) : {};
         } catch {
           payload = {};
         }
@@ -1718,8 +1810,7 @@ function portfolioApiPlugin() {
       if (pathname === CLOSED_POSITIONS_ROUTE) {
         if (req.method === 'GET') {
           try {
-            const raw = await fs.readFile(CLOSED_POSITIONS_FILE, 'utf-8');
-            const parsed = JSON.parse(raw);
+            const parsed = await readJsonFile(CLOSED_POSITIONS_FILE);
             return sendJson(res, 200, Array.isArray(parsed) ? parsed : []);
           } catch {
             return sendJson(res, 200, []);
@@ -1729,7 +1820,7 @@ function portfolioApiPlugin() {
         if (req.method === 'POST') {
           try {
             const raw = (await readRequestBody(req)).toString('utf-8') || '[]';
-            const parsed = JSON.parse(raw);
+            const parsed = JSON.parse(stripBom(raw));
             if (!Array.isArray(parsed)) return sendJson(res, 400, { message: 'payload 必须是数组' });
 
             const normalized = parsed
@@ -1762,6 +1853,66 @@ function portfolioApiPlugin() {
         return sendJson(res, 405, { message: 'Method Not Allowed' });
       }
 
+      // ---------- 网格策略：GET 读取全部 / POST 保存（数组=整体覆盖，对象=按 id upsert） ----------
+      if (pathname === GRID_ROUTE) {
+        if (req.method === 'GET') {
+          try {
+            const saved = await readJsonFile(GRID_STRATEGIES_FILE);
+            return sendJson(res, 200, Array.isArray(saved) ? saved : []);
+          } catch (error: any) {
+            if (error?.code !== 'ENOENT') {
+              return sendJson(res, 500, { message: error?.message || '读取网格策略失败' });
+            }
+            await fs.mkdir(DATA_DIR, { recursive: true });
+            await fs.writeFile(GRID_STRATEGIES_FILE, '[]\n', 'utf-8');
+            return sendJson(res, 200, []);
+          }
+        }
+
+        if (req.method === 'POST') {
+          try {
+            const raw = stripBom((await readRequestBody(req)).toString('utf-8')) || '[]';
+            const payload = JSON.parse(raw);
+            const now = Date.now();
+            const ensureUniqueIds = (list: any[]) => {
+              const used = new Set<string>();
+              return list.map((row, index) => {
+                let id = String(row?.id || '').trim() || `grid_${now + index}`;
+                while (used.has(id)) id = `${id}_${index + 1}`;
+                used.add(id);
+                return { ...row, id };
+              });
+            };
+
+            let saved: any[];
+            if (Array.isArray(payload)) {
+              saved = ensureUniqueIds(payload.map((row, index) => normalizeGridStrategy(row, `grid_${now + index}`)));
+            } else if (payload && typeof payload === 'object') {
+              const existing = await readJsonFileSafe<any[]>(GRID_STRATEGIES_FILE, []);
+              const list = Array.isArray(existing) ? [...existing] : [];
+              const item = normalizeGridStrategy(payload, `grid_${now}`);
+              const index = list.findIndex(row => String(row?.id || '') === item.id);
+              if (index >= 0) {
+                list[index] = { ...list[index], ...item, createdAt: list[index]?.createdAt || item.createdAt };
+              } else {
+                list.push(item);
+              }
+              saved = ensureUniqueIds(list);
+            } else {
+              return sendJson(res, 400, { message: 'payload 必须是策略数组或单个策略对象' });
+            }
+
+            await fs.mkdir(DATA_DIR, { recursive: true });
+            await fs.writeFile(GRID_STRATEGIES_FILE, `${JSON.stringify(saved, null, 2)}\n`, 'utf-8');
+            return sendJson(res, 200, { ok: true, count: saved.length, data: saved });
+          } catch (error: any) {
+            return sendJson(res, 400, { message: error?.message || '保存网格策略失败' });
+          }
+        }
+
+        return sendJson(res, 405, { message: 'Method Not Allowed' });
+      }
+
       if (pathname !== portfolioRoute && pathname !== watchlistRoute) return next();
 
       const targetFile = pathname === watchlistRoute ? WATCHLIST_FILE : PORTFOLIO_FILE;
@@ -1772,7 +1923,7 @@ function portfolioApiPlugin() {
         if (req.method === 'GET') {
           let content = '[]';
           try {
-            content = await fs.readFile(targetFile, 'utf-8');
+            content = stripBom(await fs.readFile(targetFile, 'utf-8'));
           } catch (error: any) {
             if (error?.code === 'ENOENT') {
               await fs.mkdir(path.dirname(targetFile), { recursive: true });
@@ -1788,7 +1939,7 @@ function portfolioApiPlugin() {
 
         if (req.method === 'POST') {
           const raw = (await readRequestBody(req)).toString('utf-8') || '[]';
-          const parsed = JSON.parse(raw);
+          const parsed = JSON.parse(stripBom(raw));
           if (!Array.isArray(parsed)) {
             res.statusCode = 400;
             res.end(JSON.stringify({ message: 'payload 必须是数组' }));

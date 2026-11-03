@@ -4,7 +4,8 @@
       <div class="brand">投资面板</div>
       <ul class="menu-list">
         <li v-for="item in sideMenus" :key="item.key" :class="{ active: activeMenu === item.key }" @click="activeMenu = item.key">
-          {{ item.label }}
+          <el-icon class="menu-icon"><component :is="item.icon" /></el-icon>
+          <span>{{ item.label }}</span>
         </li>
       </ul>
     </aside>
@@ -39,6 +40,10 @@
           <WatchList :items="watchlistData" @remove-item="removeWatchlistItem" @clear-all="clearWatchlist" />
         </template>
 
+        <template v-else-if="activeMenu === 'grid'">
+          <GridTrading :portfolio="portfolio" />
+        </template>
+
         <template v-else>
           <div class="placeholder">
             <p>{{ menuTitleMap[activeMenu] }}模块待完善</p>
@@ -51,29 +56,44 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import {
+  Grid,
+  Wallet,
+  Files,
+  DataAnalysis,
+  OfficeBuilding,
+  TrendCharts,
+  Sort,
+  Star,
+  Document,
+} from '@element-plus/icons-vue';
 import Strategy from './components/Strategy.vue';
 import Positions from './components/Positions.vue';
 import ClosedPositions from './components/ClosedPositions.vue';
 import MsciData from './components/MsciData.vue';
 import StateOwned from './components/StateOwned.vue';
 import WatchList from './components/WatchList.vue';
+import GridTrading from './components/GridTrading.vue';
 
 const WATCHLIST_API = '/api/watchlist';
+const PORTFOLIO_API = '/api/portfolio';
 
 const watchlistData = ref([]);
+const portfolio = ref([]);
 
 const activeMenu = ref('positions');
 const sideMenus = [
-  { key: 'positions', label: '持仓股票' },
-  { key: 'closed', label: '已清仓' },
-  { key: 'msci', label: 'MSCI数据' },
-  { key: 'controller', label: '国资控股' },
-  { key: 'strategy', label: '选股策略' },
-  { key: 'rebalance', label: '待调仓股票' },
-  { key: 'watchlist', label: '观察列表' },
-  { key: 'reports', label: '分析报告' },
+  { key: 'positions', label: '持仓股票', icon: Wallet },
+  { key: 'closed', label: '已清仓', icon: Files },
+  { key: 'msci', label: 'MSCI数据', icon: DataAnalysis },
+  { key: 'controller', label: '国资控股', icon: OfficeBuilding },
+  { key: 'strategy', label: '选股策略', icon: TrendCharts },
+  { key: 'rebalance', label: '待调仓股票', icon: Sort },
+  { key: 'watchlist', label: '观察列表', icon: Star },
+  { key: 'grid', label: '网格交易', icon: Grid },
+  { key: 'reports', label: '分析报告', icon: Document },
 ];
 const menuTitleMap = {
   strategy: '选股策略',
@@ -83,6 +103,7 @@ const menuTitleMap = {
   controller: '国资控股',
   rebalance: '待调仓股票',
   watchlist: '观察列表',
+  grid: '网格交易',
   reports: '分析报告',
 };
 
@@ -141,10 +162,27 @@ async function clearWatchlist() {
   }
 }
 
+async function loadPortfolioData() {
+  try {
+    const resp = await fetch(PORTFOLIO_API, { method: 'GET' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    portfolio.value = Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.error('读取持仓数据失败:', error);
+    portfolio.value = [];
+  }
+}
+
 onMounted(() => {
   void (async () => {
-    await loadWatchlistData();
+    await Promise.all([loadWatchlistData(), loadPortfolioData()]);
   })();
+});
+
+// 进入网格交易页时重新拉一次持仓，保证「从持仓导入」拿到最新数量/成本
+watch(activeMenu, menu => {
+  if (menu === 'grid') void loadPortfolioData();
 });
 </script>
 
@@ -190,9 +228,17 @@ onMounted(() => {
   border-radius: 8px;
   cursor: pointer;
   font-size: 0.94rem;
+  display: flex;
+  align-items: center;
+  gap: 9px;
   transition:
     background-color 0.2s ease,
     color 0.2s ease;
+}
+
+.menu-icon {
+  font-size: 16px;
+  opacity: 0.9;
 }
 
 .menu-list li:hover {
