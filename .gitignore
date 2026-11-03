@@ -1,43 +1,19 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-node_modules
-.pnpm-store
+# 系统文件
 .DS_Store
-dist
-dist-ssr
-coverage
-*.local
+Thumbs.db
+*.log
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# 前端工程
+stock-web/node_modules/
+stock-web/dist/
+stock-web/.vite/
 
-*.tsbuildinfo
+# 后端工程
+stock-service/venv/
+stock-service/.venv/
+stock-service/__pycache__/
+stock-service/*.pyc
+stock-service/.env
 
-.eslintcache
-
-# Cypress
-/cypress/videos/
-/cypress/screenshots/
-
-# Vitest
-__screenshots__/
-
-# Vite
-*.timestamp-*-*.mjs
-
-# 行情 / 财报缓存（可随时重建，不入库）
-data/cache
+# 历史缓存与私有数据
+stock-web/data/cache/
