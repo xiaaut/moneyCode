@@ -1,0 +1,6 @@
+# stock-service
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env

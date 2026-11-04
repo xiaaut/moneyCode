@@ -1,0 +1,45 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "1. 启动后端 (FastAPI)",
+      "type": "shell",
+      "command": "${workspaceFolder}/stock-service/.venv/bin/uvicorn app.main:app --reload --port 8000",
+      "windows": {
+        "command": "${workspaceFolder}\\stock-service\\.venv\\Scripts\\uvicorn.exe app.main:app --reload --port 8000"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/stock-service"
+      },
+      "isBackground": true,
+      "presentation": {
+        "group": "fullstack",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "2. 启动前端 (Vue 3)",
+      "type": "shell",
+      "command": "pnpm dev",
+      "options": {
+        "cwd": "${workspaceFolder}/stock-web"
+      },
+      "isBackground": true,
+      "presentation": {
+        "group": "fullstack",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "🚀 一键启动全栈服务",
+      "dependsOn": ["1. 启动后端 (FastAPI)", "2. 启动前端 (Vue 3)"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always"
+      }
+    }
+  ]
+}

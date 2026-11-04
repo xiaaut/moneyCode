@@ -40,6 +40,27 @@ const CLOSED_POSITIONS_ROUTE = '/api/closed-positions';
 const GRID_ROUTE = '/api/grid';
 const STOCK_NAME_ROUTE = '/api/stock-name';
 
+/**
+ * 已迁移到 FastAPI（stock-service）的接口前缀。
+ * 这些路径由下方 server.proxy 转发到 http://localhost:8000；
+ * 其余 /api/msci、/api/state-owned、/api/controller 仍由本插件处理（下一阶段迁移）。
+ */
+const BACKEND_MIGRATED_PREFIXES = [
+  '/api/portfolio',
+  '/api/watchlist',
+  '/api/closed-positions',
+  '/api/grid',
+  '/api/quote',
+  '/api/roe',
+  '/api/stock-name',
+  '/api/stocks',
+];
+// 后端地址：默认 127.0.0.1:8000（用 IP 而非 localhost，避免 Node 解析成 IPv6 ::1 导致连接被拒）
+const BACKEND_ORIGIN = process.env.VITE_BACKEND_ORIGIN || 'http://127.0.0.1:8000';
+const backendProxy = Object.fromEntries(
+  BACKEND_MIGRATED_PREFIXES.map(prefix => [prefix, { target: BACKEND_ORIGIN, changeOrigin: true }]),
+);
+
 // 现价 30 秒内复用；ROE 一周；实际控制人 30 天（变动很少）
 const QUOTE_TTL_MS = 30 * 1000;
 const ROE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -1577,6 +1598,15 @@ function portfolioApiPlugin() {
       const pathname = String(req.url || '').split('?')[0];
       const reqUrl = new URL(String(req.url || ''), 'http://127.0.0.1');
 
+      // 已迁移到 FastAPI 的接口放行，交给 server.proxy 转发（见文件末尾配置）
+      if (
+        BACKEND_MIGRATED_PREFIXES.some(
+          prefix => pathname === prefix || pathname.startsWith(`${prefix}/`),
+        )
+      ) {
+        return next();
+      }
+
       // ---------- 行情 ----------
       if (pathname === QUOTE_ROUTE) {
         if (req.method !== 'GET') return sendJson(res, 405, { message: 'Method Not Allowed' });
@@ -1985,6 +2015,16 @@ export default defineConfig({
   server: {
     port: 3000, // 强制指定端口号为 3000
     strictPort: false, // 设为 false 表示如果 3000 也被占用，Vite 会自动顺延寻找下一个可用端口
+
+    // 标准代理：已迁移接口转发到 FastAPI(stock-service)，路径原样透传
+    // 后端同时提供 /api/*（兼容）与 /api/v1/*（版本化）两套入口，因此无需 rewrite
+    proxy: backendProxy,
+  },
+
+  preview: {
+    port: 4173,
+    // preview 模式同样保留代理，否则 dist 预览时 /api 会 404
+    proxy: backendProxy,
   },
 
   resolve: {
