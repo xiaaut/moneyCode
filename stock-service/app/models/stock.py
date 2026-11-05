@@ -57,6 +57,22 @@ class Stock(Base):
         index=True,
         comment="是否属于 MSCI 成份股（来自 msci.json）",
     )
+    state_owned: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+        index=True,
+        comment="是否国企/政府控股（controller_category ∈ sasac/gov/finance）",
+    )
+    # MSCI 成份股导入时保留的原始列值（如「权重」「序号」），用于 GET /api/msci 原样回显
+    msci_extra: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+        comment="MSCI 导入行原始列值",
+    )
     extra: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,

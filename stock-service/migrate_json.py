@@ -39,13 +39,24 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 import app.models  # noqa: F401  注册全部模型
 from app.core.config import BASE_DIR, settings
 from app.db.session import AsyncSessionLocal, engine
-from app.models import GridStrategy, GridTradeRecord, Position, Stock, TradeHistory, WatchlistItem
+from app.models import (
+    GridStrategy,
+    GridTradeRecord,
+    MsciMeta,
+    Position,
+    Stock,
+    TradeHistory,
+    WatchlistItem,
+)
 
 DEFAULT_DATA_DIR = BASE_DIR.parent / "stock-web" / "data"
 DEFAULT_CHUNK_SIZE = 500
 
 # JSON 里的各类空值表示
 NULL_TOKENS = {"", "-", "--", "—", "nan", "null", "none", "n/a", "无", "无数据"}
+
+# 计入「国企/政府控股」的类别（与前端 STATE_CATEGORIES 一致）
+STATE_OWNED_CATEGORIES = {"sasac-central", "sasac-local", "government", "state-finance"}
 
 CENT = Decimal("0.01")
 RATIO = Decimal("0.0001")
@@ -307,19 +318,23 @@ def collect_stock_rows(data_dir: Path, portfolio_patches: list[dict]) -> tuple[l
             or to_text(record.get("controllingHolder"), 128)
             or to_text(record.get("actualHolder"), 128)
         )
+        category = (str(record.get("category") or "").strip() or None)
         put(
             to_text(record.get("code"), 8),
             {
                 "name": to_text(record.get("name"), 64),
                 "board": to_text(record.get("board"), 16),
                 "controller": controller,
-                "controller_category": to_text(record.get("category"), 32),
+                "controller_category": category,
+                "state_owned": category in STATE_OWNED_CATEGORIES,
                 "price": to_decimal(record.get("price")),
                 "change_pct": to_decimal(record.get("changePct")),
                 "market_cap_yi": to_decimal(record.get("totalMarketValue")),
                 "extra": {
                     "category_label": to_text(record.get("categoryLabel")),
                     "actual_holder": to_text(record.get("actualHolder")),
+                    "final_controller": to_text(record.get("finalController")),
+                    "controlling_holder": to_text(record.get("controllingHolder")),
                     "source": to_text(record.get("source")),
                     "source_url": to_text(record.get("sourceUrl")),
                     "note": to_text(record.get("note")),
@@ -345,6 +360,7 @@ def collect_stock_rows(data_dir: Path, portfolio_patches: list[dict]) -> tuple[l
                 "change_pct": to_decimal(record.get("changePct")),
                 "market_cap_yi": to_decimal(record.get("marketCapYi")),
                 "in_msci": True,
+                "msci_extra": json_safe(record.get("extra")),
                 "extra": {
                     "industry_group": to_text(record.get("industryGroup")),
                     "industry_parent": to_text(record.get("industryParent")),
@@ -399,6 +415,8 @@ def collect_stock_rows(data_dir: Path, portfolio_patches: list[dict]) -> tuple[l
         row.setdefault("is_watchlist", False)
         # 非 MSCI 来源的行不会带 in_msci，必须显式给默认值，否则撞 NOT NULL
         row.setdefault("in_msci", False)
+        row.setdefault("state_owned", False)
+        row.setdefault("msci_extra", {})
         rows.append(row)
     return rows, stats
 
@@ -514,6 +532,23 @@ def collect_watchlist_rows(data_dir: Path) -> tuple[list[dict], dict[str, int]]:
         )
 
     return rows, stats
+
+
+def collect_msci_meta(data_dir: Path) -> list[dict]:
+    """msci.json 顶层元信息 -> msci_meta（单例 id=1）。"""
+    payload = load_json(data_dir / "msci.json", dict)
+    if not payload:
+        return []
+    return [
+        {
+            "id": 1,
+            "file_name": to_text(payload.get("fileName"), 255),
+            "imported_at": to_datetime(payload.get("importedAt")),
+            "updated_at": to_datetime(payload.get("updatedAt")),
+            "analyzed_at": to_datetime(payload.get("analyzedAt")),
+            "columns": payload.get("columns") if isinstance(payload.get("columns"), list) else [],
+        }
+    ]
 
 
 def collect_grid_rows(data_dir: Path) -> tuple[list[dict], list[dict], dict[str, int]]:
@@ -715,6 +750,7 @@ async def migrate(data_dir: Path, dry_run: bool, chunk_size: int) -> int:
     stock_rows, stock_stats = collect_stock_rows(data_dir, portfolio_patches)
     trade_rows, trade_stats = collect_trade_rows(data_dir)
     watchlist_rows, watchlist_stats = collect_watchlist_rows(data_dir)
+    msci_meta_rows = collect_msci_meta(data_dir)
     strategy_rows, grid_trade_rows, grid_stats = collect_grid_rows(data_dir)
 
     log(
@@ -732,6 +768,7 @@ async def migrate(data_dir: Path, dry_run: bool, chunk_size: int) -> int:
         f"派生盈亏 {trade_stats['derived']} 条）"
     )
     log(f"watchlist_items {len(watchlist_rows)} 行（原始 {watchlist_stats['raw']} 条）")
+    log(f"msci_meta {len(msci_meta_rows)} 行")
     log(
         f"grid_strategies {len(strategy_rows)} 行 / grid_trade_records {len(grid_trade_rows)} 行"
     )
@@ -746,6 +783,7 @@ async def migrate(data_dir: Path, dry_run: bool, chunk_size: int) -> int:
             ("positions", len(position_rows)),
             ("trade_history", len(trade_rows)),
             ("watchlist_items", len(watchlist_rows)),
+            ("msci_meta", len(msci_meta_rows)),
             ("grid_strategies", len(strategy_rows)),
             ("grid_trade_records", len(grid_trade_rows)),
         ):
@@ -759,6 +797,7 @@ async def migrate(data_dir: Path, dry_run: bool, chunk_size: int) -> int:
             ("positions", Position, position_rows, ["code"], {"code"}),
             ("trade_history", TradeHistory, trade_rows, ["source_key"], {"source_key"}),
             ("watchlist_items", WatchlistItem, watchlist_rows, ["id"], {"id"}),
+            ("msci_meta", MsciMeta, msci_meta_rows, ["id"], {"id"}),
             ("grid_strategies", GridStrategy, strategy_rows, ["id"], {"id"}),
             ("grid_trade_records", GridTradeRecord, grid_trade_rows, ["id"], {"id"}),
         ]
@@ -792,7 +831,7 @@ async def migrate(data_dir: Path, dry_run: bool, chunk_size: int) -> int:
         print("-" * 46)
         print(f"{'表名':<22}{'记录数':>12}")
         print("-" * 46)
-        for model in (Stock, Position, TradeHistory, WatchlistItem, GridStrategy, GridTradeRecord):
+        for model in (Stock, Position, TradeHistory, WatchlistItem, MsciMeta, GridStrategy, GridTradeRecord):
             try:
                 total = await session.scalar(
                     select(func.count()).select_from(model.__table__)

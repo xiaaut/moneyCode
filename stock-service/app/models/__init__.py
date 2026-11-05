@@ -5,6 +5,7 @@ init_db / Alembic 无需逐个模块查找。
 """
 
 from app.models.grid import GridStrategy, GridTradeRecord
+from app.models.msci_meta import MsciMeta
 from app.models.portfolio import Position, TradeHistory
 from app.models.stock import Stock
 from app.models.watchlist import WatchlistItem
@@ -16,4 +17,5 @@ __all__ = [
     "GridStrategy",
     "GridTradeRecord",
     "WatchlistItem",
+    "MsciMeta",
 ]
