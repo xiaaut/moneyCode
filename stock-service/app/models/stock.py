@@ -46,6 +46,22 @@ class Stock(Base):
         Numeric(18, 4), comment="总市值（亿元）"
     )
 
+    # ---------- 全市场行情（AKShare stock_zh_a_spot_em）----------
+    volume: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), comment="成交量（手）")
+    turnover_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), comment="成交额（元）")
+    turnover_rate: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), comment="换手率(%)")
+    circ_mv: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), comment="流通市值（元）")
+    change_60d: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), comment="60 日涨跌幅(%)")
+    change_ytd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), comment="年初至今涨跌幅(%)")
+
+    # ---------- 最新财报业绩（AKShare stock_yjbb_em）----------
+    revenue: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), comment="营业总收入（元）")
+    revenue_yoy: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), comment="营收同比增长(%)")
+    net_profit: Mapped[Decimal | None] = mapped_column(Numeric(20, 4), comment="净利润（元）")
+    net_profit_yoy: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), comment="净利润同比增长(%)")
+    gross_margin: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), comment="销售毛利率(%)")
+    report_period: Mapped[str | None] = mapped_column(String(16), comment="最新财报期，如 2026Q3")
+
     is_watchlist: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false"), comment="是否在自选"
     )

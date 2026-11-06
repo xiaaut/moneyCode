@@ -1,6 +1,6 @@
 # 项目进度与技术手册（PROGRESS.md）
 
-> 生成时间：2026-11-06 · 当前状态：**前后端已全面切换到 FastAPI + NAS PostgreSQL**
+> 生成时间：2026-11-06 · 当前状态：**前后端已全面切换到 FastAPI + NAS PostgreSQL，已接入 AKShare 全市场数据底座**
 
 本文档是系统的完整技术索引，包含：目录树、数据库表结构、接口路由清单、后台异步任务机制、本地启动命令。
 
@@ -36,6 +36,8 @@ my-finance-system/
 │   ├── .env.example                  # 环境变量模板（.env 已 gitignore）
 │   ├── init_db.py                    # 建表脚本（幂等，打印建表结果）
 │   ├── migrate_json.py               # 历史 JSON 清洗导入脚本（幂等，支持 --dry-run）
+│   ├── migrate_stocks.py             # stocks 表字段平滑扩展（ALTER TABLE ADD COLUMN IF NOT EXISTS，幂等）
+│   ├── migrate_strategy.py           # strategy_config 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   └── app/
 │       ├── main.py                   # 入口：lifespan + CORS + 路由挂载 + 统一异常
 │       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池）
@@ -47,14 +49,16 @@ my-finance-system/
 │       │   ├── portfolio.py          #   positions / trade_history
 │       │   ├── grid.py               #   grid_strategies / grid_trade_records
 │       │   ├── watchlist.py          #   watchlist_items
-│       │   └── msci_meta.py          #   msci_meta（单例）
+│       │   ├── msci_meta.py          #   msci_meta（单例）
+│       │   └── strategy.py           #   strategy_config（选股策略配置，单例）
 │       ├── schemas/                  # Pydantic 模型（camelCase 对齐前端）
 │       │   ├── common.py             #   CamelModel 基类 + 脏值转换工具
-│       │   ├── portfolio.py / grid.py / stocks.py / quote.py
+│       │   ├── portfolio.py / grid.py / stocks.py / quote.py / strategy.py
 │       ├── services/
 │       │   ├── quotes.py             # 东财 push2 行情 + 腾讯行情 + ROE（TTL 内存缓存）
 │       │   ├── ths.py                # 同花顺/东财实控人抓取 + 国企关键字分类 + 央企名录
 │       │   ├── msci_parse.py         # Excel(TXT/CSV) 解析（openpyxl + xlrd）
+│       │   ├── akshare_sync.py       # AKShare 全市场同步引擎（asyncio.to_thread + 分批 upsert）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
@@ -65,7 +69,8 @@ my-finance-system/
 │               ├── quote.py          # 行情 / ROE / 名称
 │               ├── controller.py     # 实际控制人
 │               ├── msci.py           # MSCI 成份股
-│               └── state_owned.py    # 国资扫描
+│               ├── state_owned.py    # 国资扫描
+│               └── strategy.py       # 选股策略配置
 │
 └── stock-web/                        # Vue3 前端
     ├── vite.config.ts                # 仅剩 Vite 配置 + /api 代理（旧中间件已全部移除）
@@ -81,14 +86,15 @@ my-finance-system/
             ├── Strategy.vue          # 选股策略（Davis 双因子）
             ├── GridTrading.vue       # 网格交易
             ├── MsciData.vue          # MSCI 数据
-            └── StateOwned.vue        # 国资控股
+            ├── StateOwned.vue        # 国资控股
+            └── AStockMarket.vue      # A股全市场（AKShare 展示面板）
 ```
 
 ---
 
-## 3. NAS 数据库表结构（`portfolio_db`，7 张表）
+## 3. NAS 数据库表结构（`portfolio_db`，8 张表）
 
-### 3.1 stocks（3597 行）— 股票主数据（多来源合并统一视图）
+### 3.1 stocks（≈5900 行）— 股票主数据（多来源合并统一视图）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -100,12 +106,19 @@ my-finance-system/
 | pe_ttm / pb / roe | numeric | 滚动市盈率 / 市净率 / 净资产收益率 |
 | eps_current / eps_forecast | numeric | 当前 / 预测 EPS |
 | price / change_pct / market_cap_yi | numeric | 现价 / 涨跌幅 / 总市值（亿） |
+| volume / turnover_amount / turnover_rate | numeric | 成交量（手）/ 成交额（元）/ 换手率(%) |
+| circ_mv / change_60d / change_ytd | numeric | 流通市值（元）/ 60 日涨跌幅(%) / 年初至今涨跌幅(%) |
+| revenue / revenue_yoy | numeric | 营业总收入（元）/ 营收同比增长(%) |
+| net_profit / net_profit_yoy | numeric | 净利润（元）/ 净利润同比增长(%) |
+| gross_margin / report_period | numeric / varchar | 销售毛利率(%) / 最新财报期（如 2026Q3） |
 | is_watchlist | bool | 是否自选 |
 | **in_msci** | bool | 是否 MSCI 成份股（index） |
 | **state_owned** | bool | 是否国企/政府控股（index） |
 | extra | jsonb | 未结构化指标（source/note/穿透明细/controller_detail…） |
 | msci_extra | jsonb | MSCI 导入行原始列值（如「权重」「序号」） |
 | created_at / updated_at | timestamptz | 时间戳 |
+
+> 行情与财报字段由 `akshare_sync.py` 写入（AKShare `stock_zh_a_spot_em` + `stock_yjbb_em`）；字段扩展走 `migrate_stocks.py`（`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`），保留原有 controller / state_owned / in_msci 数据。
 
 ### 3.2 positions（22 行）— 当前持仓
 
@@ -132,6 +145,11 @@ my-finance-system/
 
 `file_name` · `imported_at`/`updated_at`/`analyzed_at` · `columns`(jsonb 额外列名)。
 
+### 3.8 strategy_config（0~1 行，单例 id=1）— 选股策略配置
+
+`stock_name`/`stock_code` · `current_eps`/`target_eps` · `current_pe`/`historical_avg_pe`/`mean_pe` · `hold_years` · `portfolio_count`/`max_industry_count` · `updated_at`。
+> 对应前端 Strategy.vue「Davis 双因子选股策略器」的输入参数，跨设备持久化；`epsYears`(3 年) 为前端硬编码常量不入库。由 `migrate_strategy.py` 建表（CREATE TABLE IF NOT EXISTS）。
+
 ---
 
 ## 4. FastAPI 接口路由清单
@@ -154,12 +172,14 @@ my-finance-system/
 | GET | `/api/closed-positions` | 清仓记录列表 |
 | POST | `/api/closed-positions` | 整数组覆盖清仓记录（缺字段服务端兜底推导盈亏/持有天数） |
 
-### 4.2 股票池筛选（stocks.py）
+### 4.2 股票池筛选 / AKShare 全市场（stocks.py）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/stocks` | 多条件筛选：`keyword/industry/controller_category/board/state_owned/in_msci/watchlist_only/pe_min/pe_max/roe_min/roe_max/sort/order/page/page_size` |
+| GET | `/api/stocks` | 多条件筛选 + 后端分页：`keyword/industry/controller_category/board/state_owned/in_msci/watchlist_only/pe_min/pe_max/roe_min/roe_max/mv_min/sort_by/sort_order/page/page_size`，返回 `total/items/industries/summary`（summary=总家数/涨跌家数/国企数/MSCI数/最后同步时间） |
 | GET | `/api/stocks/filters` | 筛选项下拉数据（行业/控制人类型/板块） |
+| POST | `/api/stocks/sync-akshare` | 启动后台单例同步任务（AKShare 全市场入库，重入 409） |
+| GET | `/api/stocks/sync-progress` | 同步进度（`job` + `updatedAt` + `updated`） |
 | GET | `/api/stocks/{code}` | 单只详情 |
 
 ### 4.3 网格（grid.py）
@@ -204,7 +224,15 @@ my-finance-system/
 | POST | `/api/state-owned/start` | `{force,limit}` 启动后台全量扫描（重入 409） |
 | GET | `/api/state-owned/progress` | 扫描进度 |
 
-### 4.8 系统
+### 4.8 选股策略配置（strategy.py，单例 id=1）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/strategy-config` | 读取配置（无记录时返回前端默认值） |
+| PUT / POST | `/api/strategy-config` | 整体 upsert（幂等，POST 为 PUT 别名） |
+| DELETE | `/api/strategy-config` | 重置为默认值 |
+
+### 4.9 系统
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -237,7 +265,17 @@ my-finance-system/
 
 1. 取 stocks(in_msci=True) 代码 → 2. 行业（东财 EM2016，2 天缓存）→ 3. PE/PB/现价（腾讯）→ 4. ROE（东财批量 + 逐只兜底）→ 5. 分批 upsert 回 stocks + 更新 msci_meta.analyzed_at。
 
-### 5.4 缓存策略（进程内存，等价原 JSON 缓存文件）
+### 5.4 AKShare 全市场同步（`run_akshare_sync`）
+
+单例任务 `akshare_job`（复用 `JobState`），`phase` 取值：`spot → financial → save → done | error`。akshare 是同步阻塞库，所有抓取经 `asyncio.to_thread` 放入线程池，严禁阻塞主事件循环。
+
+1. **spot**：`ak.stock_zh_a_spot_em()` 抓 5900+ 只 A 股实时行情（现价/涨跌幅/成交量/成交额/换手率/市盈率动态/市净率/总市值/流通市值/60 日涨跌幅/年初至今涨跌幅）。
+2. **financial**：自动推算最近 4 个财报期（如 20260930/20260630/20260331/20251231），逐期 `ak.stock_yjbb_em(date=…)` 抓 ROE/EPS/营收/净利/毛利率，最新报告期优先。
+3. **save**：清洗 NaN/Inf/'-'→None、代码统一 6 位，分批 upsert（**≤400 条/批**，规避 asyncpg 32767 参数上限），`ON CONFLICT (code)` 仅更新行情与财报字段，`coalesce` 保留 controller/state_owned/in_msci。
+
+> 避坑：① PostgreSQL `ORDER BY ... DESC` 默认 NULL 排最前，按市值/PE/ROE 降序时需显式 `.nulls_last()`；② `stock_yjbb_em` 的半年报/年报会额外包含约 5700 只新三板/北交所挂牌公司（代码 43x/83x/87x），合并时以 spot 全市场代码为准自然剔除。
+
+### 5.5 缓存策略（进程内存，等价原 JSON 缓存文件）
 
 | 数据 | TTL |
 |---|---|
@@ -264,6 +302,8 @@ pip install -r requirements.txt
 # 1) 建表 + 迁移（幂等，可重复执行）
 python init_db.py
 python migrate_json.py      # 可选 --dry-run 先看清洗统计
+python migrate_stocks.py    # stocks 表字段平滑扩展（AKShare 行情/财报字段）
+python migrate_strategy.py  # strategy_config 表建表（选股策略配置）
 
 # 2) 启动后端（端口 8000）
 uvicorn app.main:app --reload --port 8000
@@ -295,3 +335,23 @@ VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 pnpm dev
 - `closed-positions.json` → trade_history
 
 迁移可重复执行（`ON CONFLICT DO UPDATE` + `coalesce` 保留已有值），不会产生重复数据。
+
+## 8. 存储统一排查结论（2026-11-06）
+
+全量排查 `stock-web/src/` 后确认：**前端已无任何 `localStorage`/`sessionStorage`/`indexedDB` 引用**，所有业务数据统一走 `/api/*` 落 NAS PostgreSQL：
+
+| 侧边栏模块 | 组件 | 数据来源 |
+|---|---|---|
+| 持仓股票 | Positions.vue | `/api/portfolio` |
+| 已清仓 | ClosedPositions.vue | `/api/closed-positions` + `/api/portfolio` |
+| A股全市场 | AStockMarket.vue | `/api/stocks/*` |
+| MSCI数据 | MsciData.vue | `/api/msci` |
+| 国资控股 | StateOwned.vue | `/api/state-owned` |
+| 选股策略 | Strategy.vue | `/api/strategy-config`（本次接入，自动保存） |
+| 观察列表 | WatchList.vue | `/api/watchlist`（App 管理） |
+| 网格交易 | GridTrading.vue | `/api/grid` |
+| 待调仓股票 | 无组件（占位） | 无业务数据 |
+| 分析报告 | 无组件（占位） | 无业务数据 |
+
+- `stock-web/data/*.json` 与 `data/cache/*.json` 均为历史迁移源文件，`src/` 已无任何引用，仅作备份保留，可安全删除。
+- 「待调仓股票」「分析报告」两个菜单目前是占位项（无组件、无数据），本次不涉及迁移。

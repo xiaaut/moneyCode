@@ -28,6 +28,10 @@
           <ClosedPositions />
         </template>
 
+        <template v-else-if="activeMenu === 'market'">
+          <AStockMarket @add-watchlist="handleAddWatchlist" />
+        </template>
+
         <template v-else-if="activeMenu === 'msci'">
           <MsciData />
         </template>
@@ -68,6 +72,7 @@ import {
   Sort,
   Star,
   Document,
+  Histogram,
 } from '@element-plus/icons-vue';
 import Strategy from './components/Strategy.vue';
 import Positions from './components/Positions.vue';
@@ -76,6 +81,7 @@ import MsciData from './components/MsciData.vue';
 import StateOwned from './components/StateOwned.vue';
 import WatchList from './components/WatchList.vue';
 import GridTrading from './components/GridTrading.vue';
+import AStockMarket from './components/AStockMarket.vue';
 
 const WATCHLIST_API = '/api/watchlist';
 const PORTFOLIO_API = '/api/portfolio';
@@ -87,6 +93,7 @@ const activeMenu = ref('positions');
 const sideMenus = [
   { key: 'positions', label: '持仓股票', icon: Wallet },
   { key: 'closed', label: '已清仓', icon: Files },
+  { key: 'market', label: 'A股全市场', icon: Histogram },
   { key: 'msci', label: 'MSCI数据', icon: DataAnalysis },
   { key: 'controller', label: '国资控股', icon: OfficeBuilding },
   { key: 'strategy', label: '选股策略', icon: TrendCharts },
@@ -99,6 +106,7 @@ const menuTitleMap = {
   strategy: '选股策略',
   positions: '持仓股票',
   closed: '已清仓',
+  market: 'A股全市场',
   msci: 'MSCI数据',
   controller: '国资控股',
   rebalance: '待调仓股票',

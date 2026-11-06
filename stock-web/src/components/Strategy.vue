@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 const emit = defineEmits(['add-watchlist']);
 
 const currentEps = ref(0.0);
@@ -14,6 +14,75 @@ const stockCode = ref('600298');
 
 const portfolioCount = ref(12);
 const maxIndustryCount = ref(4);
+
+// ---------- 策略配置持久化（NAS PostgreSQL，无缝自动保存，不改 UI / 公式 / 交互） ----------
+const STRATEGY_CONFIG_API = '/api/strategy-config';
+let loaded = false; // 首次加载完成前不触发自动保存
+let saveTimer = null;
+
+function buildConfigPayload() {
+  return {
+    stockName: String(stockName.value ?? ''),
+    stockCode: String(stockCode.value ?? ''),
+    currentEps: Number(currentEps.value) || 0,
+    targetEps: Number(targetEps.value) || 0,
+    currentPe: Number(currentPe.value) || 0,
+    historicalAvgPe: Number(historicalAvgPe.value) || 0,
+    meanPe: Number(meanPe.value) || 0,
+    holdYears: Number(holdYears.value) || 0,
+    portfolioCount: Math.round(Number(portfolioCount.value) || 0),
+    maxIndustryCount: Math.round(Number(maxIndustryCount.value) || 0),
+  };
+}
+
+async function loadConfig() {
+  try {
+    const resp = await fetch(STRATEGY_CONFIG_API);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    // 后端为空时返回默认值，无条件应用即可（与前端默认值一致）
+    stockName.value = data.stockName ?? '安琪酵母';
+    stockCode.value = data.stockCode ?? '600298';
+    currentEps.value = Number(data.currentEps ?? 0);
+    targetEps.value = Number(data.targetEps ?? 0);
+    currentPe.value = Number(data.currentPe ?? 0);
+    historicalAvgPe.value = Number(data.historicalAvgPe ?? 0);
+    meanPe.value = Number(data.meanPe ?? 0);
+    holdYears.value = Number(data.holdYears ?? 3);
+    portfolioCount.value = Number(data.portfolioCount ?? 12);
+    maxIndustryCount.value = Number(data.maxIndustryCount ?? 4);
+  } catch {
+    // 读取失败时保留默认值
+  } finally {
+    loaded = true;
+  }
+}
+
+async function saveConfig() {
+  try {
+    await fetch(STRATEGY_CONFIG_API, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildConfigPayload()),
+    });
+  } catch {
+    // 保存失败静默忽略，不打断用户
+  }
+}
+
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveConfig, 600);
+}
+
+watch(
+  [stockName, stockCode, currentEps, targetEps, currentPe, historicalAvgPe, meanPe, holdYears, portfolioCount, maxIndustryCount],
+  () => {
+    if (loaded) scheduleSave();
+  },
+);
+
+onMounted(loadConfig);
 
 const gDecimal = computed(() => {
   const cur = Number(currentEps.value);
