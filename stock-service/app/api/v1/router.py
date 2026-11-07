@@ -12,6 +12,7 @@ from app.api.v1.endpoints import (
     state_owned,
     stocks,
     strategy,
+    system,
 )
 
 api_router = APIRouter()
@@ -24,5 +25,6 @@ api_router.include_router(msci.router)
 api_router.include_router(state_owned.router)
 api_router.include_router(strategy.router)
 api_router.include_router(fund_flow.router)
+api_router.include_router(system.router)
 
 __all__ = ["api_router"]

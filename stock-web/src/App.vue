@@ -2,6 +2,18 @@
   <div class="app-shell">
     <aside class="left-nav">
       <div class="brand">投资面板</div>
+      <div class="daily-sync">
+        <el-button class="sync-btn" :loading="dailySync.running" @click="startDailySync">
+          ⚡ 收盘一键更新
+        </el-button>
+        <div v-if="dailySync.running" class="sync-running">
+          <el-progress :percentage="dailySync.percent" :stroke-width="6" :show-text="false" color="#66b1ff" />
+          <span class="sync-step">{{ dailySync.current_step }}/4 {{ dailySync.step_label }}…</span>
+        </div>
+        <div v-else-if="dailySync.last_completed_at" class="sync-last">
+          上次更新 {{ formatLastCompleted(dailySync.last_completed_at) }}
+        </div>
+      </div>
       <ul class="menu-list">
         <li v-for="item in sideMenus" :key="item.key" :class="{ active: activeMenu === item.key }" @click="activeMenu = item.key">
           <el-icon class="menu-icon"><component :is="item.icon" /></el-icon>
@@ -64,7 +76,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref, watch } from 'vue';
+import { onMounted, provide, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import {
   Grid,
@@ -94,6 +106,22 @@ const PORTFOLIO_API = '/api/portfolio';
 
 const watchlistData = ref([]);
 const portfolio = ref([]);
+
+// 全局刷新信号：收盘更新完成后自增，各页面监听后重载数据
+const refreshSignal = ref(0);
+provide('appRefreshSignal', refreshSignal);
+
+// 收盘一键更新
+const dailySync = ref({
+  running: false,
+  current_step: 0,
+  step_label: '',
+  percent: 0,
+  steps: [],
+  last_completed_at: null,
+  error: '',
+});
+let dailyPollTimer = null;
 
 const activeMenu = ref('positions');
 const sideMenus = [
@@ -190,9 +218,74 @@ async function loadPortfolioData() {
   }
 }
 
+// ---------- 收盘一键更新（四合一流水线） ----------
+async function startDailySync() {
+  if (dailySync.value.running) return;
+  try {
+    const resp = await fetch('/api/system/daily-sync', { method: 'POST' });
+    const json = await resp.json().catch(() => ({}));
+    if (resp.status === 409) {
+      ElMessage.warning(json?.message || '收盘更新正在进行中');
+      if (json?.job) dailySync.value = json.job;
+      startDailyPolling();
+      return;
+    }
+    if (!resp.ok) throw new Error(json?.message || `HTTP ${resp.status}`);
+    if (json?.job) dailySync.value = json.job;
+    dailySync.value.running = true;
+    ElMessage.success('收盘一键更新已启动');
+    startDailyPolling();
+  } catch (error) {
+    ElMessage.error(`启动失败：${error.message || '请稍后重试'}`);
+  }
+}
+
+async function loadDailyProgress() {
+  try {
+    const resp = await fetch('/api/system/daily-sync/progress');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    dailySync.value = data;
+  } catch {
+    // 忽略轮询错误
+  }
+}
+
+function startDailyPolling() {
+  if (dailyPollTimer) return;
+  dailyPollTimer = setInterval(async () => {
+    await loadDailyProgress();
+    if (!dailySync.value.running) {
+      stopDailyPolling();
+      const errSteps = (dailySync.value.steps || []).filter(s => s.status === 'error').length;
+      if (errSteps) ElMessage.warning(`更新完成，其中 ${errSteps} 步失败`);
+      else ElMessage.success('收盘更新完成');
+      // 触发当前页面刷新
+      refreshSignal.value += 1;
+      void loadWatchlistData();
+      void loadPortfolioData();
+    }
+  }, 1500);
+}
+
+function stopDailyPolling() {
+  if (dailyPollTimer) {
+    clearInterval(dailyPollTimer);
+    dailyPollTimer = null;
+  }
+}
+
+function formatLastCompleted(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
 onMounted(() => {
   void (async () => {
     await Promise.all([loadWatchlistData(), loadPortfolioData()]);
+    await loadDailyProgress();
   })();
 });
 
@@ -230,6 +323,38 @@ watch(activeMenu, menu => {
   font-weight: 700;
   color: #f2f8ff;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.daily-sync {
+  padding: 12px 12px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sync-btn {
+  width: 100%;
+  border: 0;
+  color: #fff;
+  font-weight: 600;
+  background: linear-gradient(90deg, #2f82d5, #4ca0ee);
+}
+
+.sync-running {
+  margin-top: 8px;
+}
+
+.sync-step {
+  display: block;
+  margin-top: 4px;
+  color: #bcd6f2;
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
+.sync-last {
+  margin-top: 8px;
+  color: #8fb3d9;
+  font-size: 0.76rem;
+  line-height: 1.4;
 }
 
 .menu-list {

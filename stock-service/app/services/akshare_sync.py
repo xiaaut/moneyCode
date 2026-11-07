@@ -184,6 +184,23 @@ def _fetch_yjbb(period: str) -> Any:
     return ak.stock_yjbb_em(date=period)
 
 
+async def fetch_single_stock_financials(code: str) -> dict[str, Any]:
+    """拉取单股最新财报指标（eps/roe/营收净利同比/行业），跨最近 3 个财报期查找。
+
+    返回 _build_fin_rows 的 row（不含 code 键），找不到时返回 {}。
+    """
+    for period in _recent_report_dates(3):
+        try:
+            df = await asyncio.to_thread(_fetch_yjbb, period)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("单股财报拉取失败 %s(%s): %s", code, period, exc)
+            continue
+        rows = _build_fin_rows(df, _report_period_label(period))
+        if code in rows:
+            return rows[code]
+    return {}
+
+
 # --------------------------------------------------------------------------- #
 # 同步任务单例
 # --------------------------------------------------------------------------- #

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, inject, onMounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { mergeHoldings, parseHoldingsText } from '../utils/holdingsImport.js';
 import FundFlowSpark from './FundFlowSpark.vue';
@@ -871,6 +871,15 @@ onMounted(() => {
     refreshDerivedFields(false);
     void loadFundSummary();
   })();
+});
+
+// 收盘一键更新完成后自动刷新
+const appRefreshSignal = inject('appRefreshSignal', ref(0));
+watch(appRefreshSignal, () => {
+  void loadTableDataFromFile().then(() => {
+    refreshDerivedFields(false);
+    void loadFundSummary();
+  });
 });
 </script>
 

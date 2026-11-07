@@ -10,14 +10,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import Select, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.models import Stock
+from app.models import Position, Stock, WatchlistItem
 from app.schemas.stocks import (
     StockFilterOptions,
     StockListResponse,
@@ -25,6 +27,7 @@ from app.schemas.stocks import (
     StockSummary,
 )
 from app.services import akshare_sync
+from app.services.quotes import quote_service
 
 router = APIRouter(tags=["stocks"])
 
@@ -322,6 +325,127 @@ async def sync_progress() -> dict:
         "updatedAt": akshare_sync.akshare_meta.get("updatedAt"),
         "updated": akshare_sync.akshare_job.done,
     }
+
+
+def _lookup_item(row: Stock) -> dict:
+    def f(value):
+        return float(value) if value is not None else None
+
+    return {
+        "code": row.code,
+        "name": row.name,
+        "industry": row.industry,
+        "price": f(row.price),
+        "pe_ttm": f(row.pe_ttm),
+        "pb": f(row.pb),
+        "roe": f(row.roe),
+        "eps_current": f(row.eps_current),
+        "eps_forecast": f(row.eps_forecast),
+        "net_profit_yoy": f(row.net_profit_yoy),
+        "revenue_yoy": f(row.revenue_yoy),
+    }
+
+
+@router.get("/stocks/lookup", summary="股票快速检索（代码/名称 + 持仓/自选快捷列表）")
+async def lookup_stocks(
+    q: str = Query("", description="代码或名称关键字"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    pos_codes = list(dict.fromkeys(c for c in (await db.scalars(select(Position.code))).all() if c))
+    wl_codes = list(dict.fromkeys(c for c in (await db.scalars(select(WatchlistItem.stock_code))).all() if c))
+
+    async def rows_by_codes(codes: list[str]) -> list[dict]:
+        if not codes:
+            return []
+        rows = (await db.scalars(select(Stock).where(Stock.code.in_(codes)))).all()
+        by_code = {r.code: r for r in rows}
+        return [_lookup_item(by_code[c]) for c in codes if c in by_code]
+
+    items: list[dict] = []
+    if q.strip():
+        pattern = f"%{q.strip()}%"
+        rows = (
+            await db.scalars(
+                select(Stock)
+                .where(or_(Stock.code.ilike(pattern), Stock.name.ilike(pattern)))
+                .order_by(Stock.code)
+                .limit(15)
+            )
+        ).all()
+        items = [_lookup_item(r) for r in rows]
+
+    return {
+        "items": items,
+        "positions": await rows_by_codes(pos_codes),
+        "watchlist": await rows_by_codes(wl_codes),
+    }
+
+
+@router.post("/stocks/refresh-single/{code}", summary="刷新单股行情与财务指标")
+async def refresh_single_stock(code: str, db: AsyncSession = Depends(get_db)) -> dict:
+    normalized = akshare_sync._normalize_code(code)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="无效的股票代码")
+
+    # 1) 实时行情（腾讯）
+    quote: dict = {}
+    try:
+        quotes = await quote_service.fetch_tencent([normalized])
+        quote = quotes.get(normalized) or {}
+    except Exception as exc:  # noqa: BLE001
+        quote = {"_error": str(exc)}
+
+    # 2) 最新财报指标（业绩报表）
+    financials = await akshare_sync.fetch_single_stock_financials(normalized)
+
+    name = quote.get("name") or normalized
+    row_data = {
+        "code": normalized,
+        "price": quote.get("price"),
+        "change_pct": quote.get("changePct"),
+        "pe_ttm": quote.get("peTtm"),
+        "pb": quote.get("pb"),
+        "market_cap_yi": quote.get("marketCapYi"),
+        "roe": financials.get("roe"),
+        "eps_current": financials.get("eps_current"),
+        "revenue_yoy": financials.get("revenue_yoy"),
+        "net_profit_yoy": financials.get("net_profit_yoy"),
+        "gross_margin": financials.get("gross_margin"),
+        "industry": financials.get("industry"),
+        "report_period": financials.get("report_period"),
+    }
+
+    # 3) 写回 stocks 表（只更新拉取到的字段，其余保留）
+    table = Stock.__table__
+    upsert_values = {"code": normalized, "name": name}
+    for key, value in row_data.items():
+        if key in ("code", "name"):
+            continue
+        if value is not None:
+            upsert_values[key] = value
+
+    if len(upsert_values) > 2:
+        statement = pg_insert(table).values(upsert_values)
+        set_map = {}
+        for key in upsert_values:
+            if key == "code":
+                continue
+            set_map[key] = statement.excluded[key]
+        set_map["updated_at"] = func.now()
+        await db.execute(
+            statement.on_conflict_do_update(index_elements=["code"], set_=set_map)
+        )
+        await db.commit()
+
+    # 4) 返回最新字段（缺失的用库内已有值兜底）
+    fresh = await db.scalar(select(Stock).where(Stock.code == normalized))
+    result = _lookup_item(fresh) if fresh else _lookup_item(Stock(code=normalized, name=name))
+    result["name"] = name
+    result["change_pct"] = quote.get("changePct")
+    result["market_cap_yi"] = quote.get("marketCapYi")
+    result["gross_margin"] = financials.get("gross_margin")
+    result["report_period"] = financials.get("report_period")
+    return result
 
 
 @router.get("/stocks/{code}", response_model=StockOut, summary="单只股票详情")

@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import FundFlowDrawer from './FundFlowDrawer.vue';
 
@@ -138,6 +138,13 @@ onMounted(() => {
   loadLhb();
 });
 onBeforeUnmount(stopPolling);
+
+// 收盘一键更新完成后自动刷新
+const appRefreshSignal = inject('appRefreshSignal', ref(0));
+watch(appRefreshSignal, () => {
+  loadRank();
+  loadLhb();
+});
 </script>
 
 <template>

@@ -62,19 +62,21 @@ my-finance-system/
 │       │   ├── msci_parse.py         # Excel(TXT/CSV) 解析（openpyxl + xlrd）
 │       │   ├── akshare_sync.py       # AKShare 全市场同步引擎（asyncio.to_thread + 分批 upsert）
 │       │   ├── fund_flow.py          # 资金流/龙虎榜采集（to_thread + 防封限流 + 席位明细）
+│       │   ├── daily_sync.py         # 收盘一键更新（四合一异步流水线编排）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
 │           └── endpoints/
 │               ├── portfolio.py      # 持仓 / 自选 / 清仓
-│               ├── stocks.py         # 股票池筛选
+│               ├── stocks.py         # 股票池筛选 / 快速检索 / 单股刷新
 │               ├── grid.py           # 网格策略
 │               ├── quote.py          # 行情 / ROE / 名称
 │               ├── controller.py     # 实际控制人
 │               ├── msci.py           # MSCI 成份股
 │               ├── state_owned.py    # 国资扫描
 │               ├── strategy.py       # 选股策略配置
-│               └── fund_flow.py      # 资金流 / 龙虎榜
+│               ├── fund_flow.py      # 资金流 / 龙虎榜
+│               └── system.py         # 收盘一键更新
 │
 └── stock-web/                        # Vue3 前端
     ├── vite.config.ts                # 仅剩 Vite 配置 + /api 代理（旧中间件已全部移除）
@@ -195,6 +197,8 @@ my-finance-system/
 |---|---|---|
 | GET | `/api/stocks` | 多条件筛选 + 后端分页：`keyword/industry/controller_category/board/state_owned/in_msci/watchlist_only/pe_min/pe_max/roe_min/roe_max/mv_min/sort_by/sort_order/page/page_size`，返回 `total/items/industries/summary`（summary=总家数/涨跌家数/国企数/MSCI数/最后同步时间） |
 | GET | `/api/stocks/filters` | 筛选项下拉数据（行业/控制人类型/板块） |
+| GET | `/api/stocks/lookup` | 快速检索：`q=` 代码/名称模糊匹配（前 15 条），同时返回持仓/自选快捷列表 |
+| POST | `/api/stocks/refresh-single/{code}` | 实时拉取单股行情（腾讯）+财报（业绩报表）并写回 stocks，返回最新字段 |
 | POST | `/api/stocks/sync-akshare` | 启动后台单例同步任务（AKShare 全市场入库，重入 409） |
 | GET | `/api/stocks/sync-progress` | 同步进度（`job` + `updatedAt` + `updated`） |
 | GET | `/api/stocks/{code}` | 单只详情 |
@@ -262,10 +266,12 @@ my-finance-system/
 | GET | `/api/lhb/progress` | 龙虎榜同步进度 |
 | GET | `/api/lhb/daily` | `instOnly=` 龙虎榜每日总览（含机构净买） |
 
-### 4.10 系统
+### 4.10 系统（system.py）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| POST | `/api/system/daily-sync` | 启动收盘一键更新（四合一流水线，重入 409） |
+| GET | `/api/system/daily-sync/progress` | 流水线进度（running/current_step/percent/steps[]/last_completed_at） |
 | GET | `/` | 服务信息 |
 | GET | `/api/v1/health` | 健康检查（真实 `SELECT 1`，DB 不可用时 503） |
 
@@ -305,7 +311,18 @@ my-finance-system/
 
 > 避坑：① PostgreSQL `ORDER BY ... DESC` 默认 NULL 排最前，按市值/PE/ROE 降序时需显式 `.nulls_last()`；② `stock_yjbb_em` 的半年报/年报会额外包含约 5700 只新三板/北交所挂牌公司（代码 43x/83x/87x），合并时以 spot 全市场代码为准自然剔除。
 
-### 5.5 缓存策略（进程内存，等价原 JSON 缓存文件）
+### 5.5 收盘一键更新（`run_daily_sync`，四合一流水线）
+
+单例状态 `daily_state`，`current_step` 1~4，`percent` 按权重累加（15/35/30/20）。单步报错记录 warning 但不中断后续步骤：
+
+1. **Step 1 (15%)**：腾讯行情刷新持仓现价，重算 positions 的 market_value / profit_amount / profit_ratio。
+2. **Step 2 (35%)**：`akshare_sync.run_akshare_sync()` 同步全市场行情与季报业绩。
+3. **Step 3 (30%)**：`fund_flow.run_fund_flow_sync()` 同步持仓/自选主力资金流。
+4. **Step 4 (20%)**：`fund_flow.run_lhb_sync()` 同步龙虎榜汇总与席位明细。
+
+> 前端 App.vue 侧边栏「⚡ 收盘一键更新」轮询 `/api/system/daily-sync/progress`，完成后经 `provide/inject` 的 `appRefreshSignal` 触发持仓/全市场/资金异动三页自动重载。
+
+### 5.6 缓存策略（进程内存，等价原 JSON 缓存文件）
 
 | 数据 | TTL |
 |---|---|

@@ -1,5 +1,6 @@
 ﻿<script setup>
 import { computed, onMounted, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
 const emit = defineEmits(['add-watchlist']);
 
 const currentEps = ref(0.0);
@@ -82,7 +83,79 @@ watch(
   },
 );
 
-onMounted(loadConfig);
+onMounted(() => {
+  loadConfig();
+  loadQuickLists();
+});
+
+// ---------- 快速调取股票数据（自动填充指标，不改原有公式 / 防抖保存） ----------
+const LOOKUP_API = '/api/stocks/lookup';
+const lookupQuery = ref('');
+const quickPositions = ref([]);
+const quickWatchlist = ref([]);
+const selectedStockInfo = ref(null);
+const refreshingSingle = ref(false);
+
+async function loadQuickLists() {
+  try {
+    const resp = await fetch(LOOKUP_API);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    quickPositions.value = data.positions || [];
+    quickWatchlist.value = data.watchlist || [];
+  } catch {
+    // 忽略
+  }
+}
+
+async function searchStocks(query, cb) {
+  const q = String(query || '').trim();
+  try {
+    const resp = await fetch(`${LOOKUP_API}?q=${encodeURIComponent(q)}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    quickPositions.value = data.positions || [];
+    quickWatchlist.value = data.watchlist || [];
+    cb((data.items || []).map(i => ({ ...i, value: `${i.name}（${i.code}）` })));
+  } catch {
+    cb([]);
+  }
+}
+
+function selectStock(item) {
+  if (!item) return;
+  stockCode.value = String(item.code || '').trim();
+  stockName.value = String(item.name || '').trim();
+  if (Number(item.pe_ttm) > 0) currentPe.value = Number(item.pe_ttm);
+  if (Number(item.eps_current) > 0) currentEps.value = Number(item.eps_current);
+  if (Number(item.eps_forecast) > 0) targetEps.value = Number(item.eps_forecast);
+  selectedStockInfo.value = item;
+  ElMessage.success(`已导入 ${item.name}（${item.code}）`);
+}
+
+async function refreshSingle() {
+  const code = String(stockCode.value || '').trim();
+  if (!code) {
+    ElMessage.warning('请先输入或选择股票代码');
+    return;
+  }
+  refreshingSingle.value = true;
+  try {
+    const resp = await fetch(`/api/stocks/refresh-single/${code}`, { method: 'POST' });
+    const json = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(json?.message || `HTTP ${resp.status}`);
+    if (Number(json.pe_ttm) > 0) currentPe.value = Number(json.pe_ttm);
+    if (Number(json.eps_current) > 0) currentEps.value = Number(json.eps_current);
+    if (Number(json.eps_forecast) > 0) targetEps.value = Number(json.eps_forecast);
+    if (json.name) stockName.value = json.name;
+    selectedStockInfo.value = json;
+    ElMessage.success('已实时刷新该股行情与财报');
+  } catch (error) {
+    ElMessage.error(`刷新失败：${error.message || '请稍后重试'}`);
+  } finally {
+    refreshingSingle.value = false;
+  }
+}
 
 const gDecimal = computed(() => {
   const cur = Number(currentEps.value);
@@ -202,6 +275,51 @@ function handleAddWatchlist() {
       </div>
       <div class="top-action">↪</div>
     </header>
+
+    <div class="lookup-bar">
+      <el-autocomplete
+        v-model="lookupQuery"
+        :fetch-suggestions="searchStocks"
+        placeholder="输入代码 / 名称搜索，自动填充指标"
+        clearable
+        style="width: 320px"
+        @select="selectStock"
+      >
+        <template #default="{ item }">
+          <div class="lookup-option">
+            <span class="lk-name">{{ item.name }}</span>
+            <span class="lk-code">{{ item.code }}</span>
+            <span v-if="item.industry" class="lk-industry">{{ item.industry }}</span>
+            <span v-if="item.pe_ttm" class="lk-pe">PE {{ Number(item.pe_ttm).toFixed(1) }}</span>
+          </div>
+        </template>
+      </el-autocomplete>
+
+      <el-dropdown @command="selectStock">
+        <el-button>从持仓 / 自选导入</el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item v-for="p in quickPositions" :key="'p' + p.code" :command="p">
+              持仓 · {{ p.name }}（{{ p.code }}）
+            </el-dropdown-item>
+            <el-dropdown-item v-for="w in quickWatchlist" :key="'w' + w.code" :command="w">
+              自选 · {{ w.name }}（{{ w.code }}）
+            </el-dropdown-item>
+            <el-dropdown-item v-if="!quickPositions.length && !quickWatchlist.length" disabled>
+              暂无持仓 / 自选
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+
+      <el-button type="primary" plain :loading="refreshingSingle" @click="refreshSingle">
+        🔄 实时刷新该股行情与财报
+      </el-button>
+
+      <span v-if="selectedStockInfo" class="lk-hint">
+        现价 {{ selectedStockInfo.price ?? '-' }} · PE {{ selectedStockInfo.pe_ttm ?? '-' }} · ROE {{ selectedStockInfo.roe ?? '-' }}% · 营收同比 {{ selectedStockInfo.revenue_yoy ?? '-' }}%
+      </span>
+    </div>
 
     <main class="layout">
       <section class="left-pane">
@@ -633,5 +751,50 @@ h2 {
   .calc-grid {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+.lookup-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid #d7e0ea;
+  border-radius: 10px;
+  background: #f9fbfd;
+}
+
+.lookup-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.4;
+}
+
+.lk-name {
+  font-weight: 600;
+  color: #21384f;
+}
+
+.lk-code {
+  color: #8a99ab;
+  font-size: 0.85rem;
+}
+
+.lk-industry {
+  color: #5a7188;
+  font-size: 0.85rem;
+}
+
+.lk-pe {
+  color: #2f82d5;
+  font-size: 0.85rem;
+}
+
+.lk-hint {
+  color: #445a73;
+  font-size: 0.86rem;
+  white-space: nowrap;
 }
 </style>

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 
 const emit = defineEmits(['add-watchlist']);
@@ -256,6 +256,12 @@ onMounted(async () => {
   if (job.value.running) startPolling();
 });
 onBeforeUnmount(stopPolling);
+
+// 收盘一键更新完成后自动刷新
+const appRefreshSignal = inject('appRefreshSignal', ref(0));
+watch(appRefreshSignal, () => {
+  void loadData();
+});
 </script>
 
 <template>
