@@ -2,6 +2,8 @@
 import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { mergeHoldings, parseHoldingsText } from '../utils/holdingsImport.js';
+import FundFlowSpark from './FundFlowSpark.vue';
+import FundFlowDrawer from './FundFlowDrawer.vue';
 
 const PORTFOLIO_API = '/api/portfolio';
 const IMPORT_PLACEHOLDER =
@@ -137,6 +139,12 @@ const importMode = ref('merge');
 const editingRowId = ref(null);
 const refreshingPrice = ref(false);
 const refreshingFundamental = ref(false);
+const syncingFundFlow = ref(false);
+const fundSummary = ref({});
+const drawerVisible = ref(false);
+const drawerCode = ref('');
+const drawerName = ref('');
+const drawerValuation = ref(null);
 const addingStock = ref(false);
 const pieTipSector = ref({ visible: false, x: 0, y: 0, text: '' });
 const pieTipStock = ref({ visible: false, x: 0, y: 0, text: '' });
@@ -585,6 +593,72 @@ async function refreshFundamentals() {
   }
 }
 
+// ---------- 主力资金流（内嵌微图 + 详情抽屉） ----------
+async function loadFundSummary() {
+  const codes = tableData.value.map(row => String(row.code || '').trim()).filter(Boolean);
+  if (!codes.length) {
+    fundSummary.value = {};
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/fund-flow/mini-summary?codes=${encodeURIComponent(codes.join(','))}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    fundSummary.value = data?.items || {};
+  } catch {
+    // 忽略
+  }
+}
+
+async function syncFundFlow() {
+  syncingFundFlow.value = true;
+  try {
+    const resp = await fetch('/api/fund-flow/sync-portfolio', { method: 'POST' });
+    const json = await resp.json().catch(() => ({}));
+    if (resp.status === 409) {
+      ElMessage.warning(json?.message || '资金流同步正在进行中');
+      return;
+    }
+    if (!resp.ok) throw new Error(json?.message || `HTTP ${resp.status}`);
+    ElMessage.success('主力资金同步已启动，约 30 秒后自动刷新');
+    for (let i = 0; i < 120; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        const pr = await fetch('/api/fund-flow/sync-progress');
+        const pd = await pr.json();
+        if (!pd?.job?.running) {
+          if (pd?.job?.phase === 'error') ElMessage.error(pd.job.error || '同步失败');
+          break;
+        }
+      } catch {
+        break;
+      }
+    }
+    await loadFundSummary();
+  } catch (error) {
+    ElMessage.error(`同步失败：${error.message || '请稍后重试'}`);
+  } finally {
+    syncingFundFlow.value = false;
+  }
+}
+
+function openDrawer(row) {
+  drawerCode.value = String(row.code || '').trim();
+  drawerName.value = row.name || '';
+  drawerValuation.value = {
+    pb: row.pb,
+    pe: row.pe,
+    roe: row.roe,
+    avgPe: row.avgPe,
+    eps: row.eps,
+    eps3y: row.eps3y,
+    g: row.g,
+    peg: row.peg,
+    expectedReturn: row.expectedReturn,
+  };
+  drawerVisible.value = true;
+}
+
 function openImportDialog() {
   importDialogVisible.value = true;
   importText.value = '';
@@ -795,6 +869,7 @@ onMounted(() => {
   void (async () => {
     await loadTableDataFromFile();
     refreshDerivedFields(false);
+    void loadFundSummary();
   })();
 });
 </script>
@@ -806,12 +881,18 @@ onMounted(() => {
       <el-button @click="openImportDialog">批量导入</el-button>
       <el-button type="success" :loading="refreshingPrice" @click="refreshCurrentPrices">刷新当前股票现价</el-button>
       <el-button type="warning" :loading="refreshingFundamental" @click="refreshFundamentals">刷新 ROE（财报）</el-button>
+      <el-button type="danger" plain :loading="syncingFundFlow" @click="syncFundFlow">同步主力资金</el-button>
     </div>
 
-    <el-table :data="tableData" border style="width: 100%" :cell-class-name="tableCellClassName" :row-class-name="tableRowClassName" show-summary :summary-method="getSummaries" size="small">
-      <el-table-column type="index" label="序号" width="60" align="center" />
-      <el-table-column prop="code" label="股票代码" width="100" align="center" />
-      <el-table-column prop="name" label="股票名称" width="120" align="center" />
+    <el-table :data="tableData" border style="width: 100%" max-height="620" :cell-class-name="tableCellClassName" :row-class-name="tableRowClassName" show-summary :summary-method="getSummaries" size="small" @row-click="openDrawer">
+      <el-table-column type="index" label="序号" width="60" align="center" fixed />
+      <el-table-column prop="code" label="股票代码" width="100" align="center" fixed />
+      <el-table-column prop="name" label="股票名称" width="150" align="center" fixed>
+        <template #default="scope">
+          {{ scope.row.name }}
+          <el-tag v-if="fundSummary[scope.row.code]?.lhb" size="small" type="danger" style="margin-left:4px">🔥龙虎榜</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="sector" label="所属板块" width="120" align="center" />
       <el-table-column prop="costPrice" label="成本价" width="100" align="right" />
       <el-table-column prop="quantity" label="持仓数量" width="100" align="right" />
@@ -821,20 +902,17 @@ onMounted(() => {
       <el-table-column prop="profitAmount" label="盈亏金额" width="110" align="right" :formatter="formatThreeDecimalCell" />
       <el-table-column prop="profitRatio" label="盈亏比例 (%)" width="120" align="right" />
       <el-table-column prop="positionRatio" label="仓位占比 (%)" width="120" align="right" />
-      <el-table-column prop="pb" label="PB" width="80" align="right" />
-      <el-table-column prop="pe" label="PE (TTM)" width="100" align="right" />
-      <el-table-column prop="roe" label="ROE (加权)" width="120" align="right" />
-      <el-table-column prop="avgPe" label="平均pe" width="90" align="right" />
-      <el-table-column prop="eps" label="eps" width="90" align="right" />
-      <el-table-column prop="eps3y" label="eps（3年）" width="110" align="right" />
-      <el-table-column prop="g" label="g" width="80" align="right" />
-      <el-table-column prop="peg" label="peg" width="80" align="right" />
-      <el-table-column prop="expectedReturn" label="预估收益率" width="110" align="right" />
+
+      <el-table-column label="近5日主力动向" width="130" align="center">
+        <template #default="scope">
+          <FundFlowSpark :values="fundSummary[scope.row.code]?.mainNetInflow5 || []" :sum="fundSummary[scope.row.code]?.sum5 || 0" />
+        </template>
+      </el-table-column>
 
       <el-table-column label="操作" width="140" fixed="right" align="center">
         <template #default="scope">
-          <el-button link type="primary" @click="openEditDialog(scope.row)">修改</el-button>
-          <el-button link type="danger" @click="deleteRow(scope.row)">删除</el-button>
+          <el-button link type="primary" @click.stop="openEditDialog(scope.row)">修改</el-button>
+          <el-button link type="danger" @click.stop="deleteRow(scope.row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -1004,6 +1082,8 @@ onMounted(() => {
       <el-button type="primary" @click="confirmImport">导入</el-button>
     </template>
   </el-dialog>
+
+  <FundFlowDrawer v-model="drawerVisible" :code="drawerCode" :name="drawerName" :valuation="drawerValuation" />
 </template>
 
 <style scoped>

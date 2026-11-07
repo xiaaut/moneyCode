@@ -248,9 +248,12 @@ def _build_fin_rows(df: Any, period_label: str) -> dict[str, dict[str, Any]]:
             continue
         row: dict[str, Any] = {"report_period": period_label}
         for column, target in FIN_COLUMN_MAP.items():
-            if target in ("code", "name", "industry"):
+            if target in ("code", "name"):
                 continue
-            row[target] = _to_float(record.get(column))
+            if target == "industry":
+                row[target] = _to_str(record.get(column))
+            else:
+                row[target] = _to_float(record.get(column))
         result[code] = row
     return result
 

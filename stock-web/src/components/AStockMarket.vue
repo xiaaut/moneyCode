@@ -49,6 +49,7 @@ const SORT_MAP = {
   revenueYoy: 'revenue_yoy',
   netProfitYoy: 'net_profit_yoy',
   price: 'price',
+  industry: 'industry',
 };
 
 const progressPercent = computed(() => {
@@ -323,37 +324,36 @@ onBeforeUnmount(stopPolling);
       </div>
     </div>
 
-    <div class="filter-row">
-      <el-input
-        v-model="filters.keyword"
-        placeholder="代码 / 名称搜索"
-        clearable
-        style="width: 200px"
-        @keyup.enter="onSearch"
-        @clear="onSearch"
-      />
-      <el-select v-model="filters.industry" placeholder="全部行业" clearable filterable style="width: 190px" @change="onSearch">
-        <el-option v-for="item in industries" :key="item" :label="item" :value="item" />
-      </el-select>
-      <el-checkbox v-model="filters.stateOwned" @change="onSearch">仅国资控股</el-checkbox>
-      <el-checkbox v-model="filters.inMsci" @change="onSearch">仅 MSCI</el-checkbox>
-      <div class="range-group">
+    <div class="filter-panel">
+      <div class="filter-main">
+        <el-input
+          v-model="filters.keyword"
+          placeholder="搜索代码 / 名称"
+          clearable
+          style="width: 200px"
+          @keyup.enter="onSearch"
+          @clear="onSearch"
+        />
+        <el-select v-model="filters.industry" placeholder="全部行业" clearable filterable style="width: 240px" @change="onSearch">
+          <el-option v-for="item in industries" :key="item" :label="item" :value="item" />
+        </el-select>
+        <el-checkbox v-model="filters.stateOwned" @change="onSearch">仅国资控股</el-checkbox>
+        <el-checkbox v-model="filters.inMsci" @change="onSearch">仅 MSCI</el-checkbox>
+        <el-button type="primary" @click="onSearch">查询</el-button>
+        <el-button text @click="resetFilters">重置</el-button>
+      </div>
+      <div class="filter-adv">
+        <span class="adv-label">估值 / 规模：</span>
         <span class="range-label">PE</span>
-        <el-input v-model="filters.peMin" placeholder="最小" type="number" style="width: 78px" @keyup.enter="onSearch" />
+        <el-input v-model="filters.peMin" placeholder="最小" type="number" style="width: 80px" @keyup.enter="onSearch" />
         <span class="range-sep">~</span>
-        <el-input v-model="filters.peMax" placeholder="最大" type="number" style="width: 78px" @keyup.enter="onSearch" />
+        <el-input v-model="filters.peMax" placeholder="最大" type="number" style="width: 80px" @keyup.enter="onSearch" />
+        <span class="range-label">ROE ≥</span>
+        <el-input v-model="filters.roeMin" placeholder="%" type="number" style="width: 76px" @keyup.enter="onSearch" />
+        <span class="range-label">市值 ≥</span>
+        <el-input v-model="filters.mvMin" placeholder="亿" type="number" style="width: 76px" @keyup.enter="onSearch" />
+        <span class="result-count">共 {{ total }} 只</span>
       </div>
-      <div class="range-group">
-        <span class="range-label">ROE≥</span>
-        <el-input v-model="filters.roeMin" placeholder="%" type="number" style="width: 74px" @keyup.enter="onSearch" />
-      </div>
-      <div class="range-group">
-        <span class="range-label">市值≥</span>
-        <el-input v-model="filters.mvMin" placeholder="亿" type="number" style="width: 74px" @keyup.enter="onSearch" />
-      </div>
-      <el-button type="primary" plain @click="onSearch">查询</el-button>
-      <el-button text @click="resetFilters">重置</el-button>
-      <span class="result-count">共 {{ total }} 只</span>
     </div>
 
     <el-table
@@ -405,8 +405,10 @@ onBeforeUnmount(stopPolling);
           <span :class="changeClass(scope.row.netProfitYoy)">{{ formatSigned(scope.row.netProfitYoy) }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="industry" label="行业" width="120" align="center" show-overflow-tooltip>
-        <template #default="scope">{{ scope.row.industry || '-' }}</template>
+      <el-table-column label="行业" width="140" align="center" show-overflow-tooltip sortable="custom" prop="industry">
+        <template #default="scope">
+          <span class="industry-text">{{ scope.row.industry || '-' }}</span>
+        </template>
       </el-table-column>
       <el-table-column label="标签" width="128" align="center">
         <template #default="scope">
@@ -537,18 +539,36 @@ onBeforeUnmount(stopPolling);
   font-size: 0.9rem;
 }
 
-.filter-row {
+.filter-panel {
+  border: 1px solid #e1e9f2;
+  border-radius: 10px;
+  background: #fbfdff;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.filter-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.filter-adv {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e1e9f2;
 }
 
-.range-group {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+.adv-label {
+  color: #33475b;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .range-label {
@@ -570,6 +590,10 @@ onBeforeUnmount(stopPolling);
 .stock-name {
   font-weight: 600;
   color: #21384f;
+}
+
+.industry-text {
+  color: #445a73;
 }
 
 .tag-cell {

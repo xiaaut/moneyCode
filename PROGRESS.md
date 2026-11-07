@@ -38,6 +38,7 @@ my-finance-system/
 │   ├── migrate_json.py               # 历史 JSON 清洗导入脚本（幂等，支持 --dry-run）
 │   ├── migrate_stocks.py             # stocks 表字段平滑扩展（ALTER TABLE ADD COLUMN IF NOT EXISTS，幂等）
 │   ├── migrate_strategy.py           # strategy_config 表建表（CREATE TABLE IF NOT EXISTS，幂等）
+│   ├── migrate_fund_flow.py          # 资金流/龙虎榜建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   └── app/
 │       ├── main.py                   # 入口：lifespan + CORS + 路由挂载 + 统一异常
 │       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池）
@@ -50,7 +51,8 @@ my-finance-system/
 │       │   ├── grid.py               #   grid_strategies / grid_trade_records
 │       │   ├── watchlist.py          #   watchlist_items
 │       │   ├── msci_meta.py          #   msci_meta（单例）
-│       │   └── strategy.py           #   strategy_config（选股策略配置，单例）
+│       │   ├── strategy.py           #   strategy_config（选股策略配置，单例）
+│       │   └── fund_flow.py          #   stock_fund_flow_daily / stock_lhb_daily
 │       ├── schemas/                  # Pydantic 模型（camelCase 对齐前端）
 │       │   ├── common.py             #   CamelModel 基类 + 脏值转换工具
 │       │   ├── portfolio.py / grid.py / stocks.py / quote.py / strategy.py
@@ -59,6 +61,7 @@ my-finance-system/
 │       │   ├── ths.py                # 同花顺/东财实控人抓取 + 国企关键字分类 + 央企名录
 │       │   ├── msci_parse.py         # Excel(TXT/CSV) 解析（openpyxl + xlrd）
 │       │   ├── akshare_sync.py       # AKShare 全市场同步引擎（asyncio.to_thread + 分批 upsert）
+│       │   ├── fund_flow.py          # 资金流/龙虎榜采集（to_thread + 防封限流 + 席位明细）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
@@ -70,7 +73,8 @@ my-finance-system/
 │               ├── controller.py     # 实际控制人
 │               ├── msci.py           # MSCI 成份股
 │               ├── state_owned.py    # 国资扫描
-│               └── strategy.py       # 选股策略配置
+│               ├── strategy.py       # 选股策略配置
+│               └── fund_flow.py      # 资金流 / 龙虎榜
 │
 └── stock-web/                        # Vue3 前端
     ├── vite.config.ts                # 仅剩 Vite 配置 + /api 代理（旧中间件已全部移除）
@@ -88,11 +92,14 @@ my-finance-system/
             ├── MsciData.vue          # MSCI 数据
             ├── StateOwned.vue        # 国资控股
             └── AStockMarket.vue      # A股全市场（AKShare 展示面板）
+            ├── FundFlow.vue          # 资金与异动（抢筹榜 + 龙虎榜双 Tab）
+            ├── FundFlowDrawer.vue    # 个股资金与异动详情抽屉（3 图）
+            └── FundFlowSpark.vue     # 近5日主力迷你柱状图（内嵌持仓/自选）
 ```
 
 ---
 
-## 3. NAS 数据库表结构（`portfolio_db`，8 张表）
+## 3. NAS 数据库表结构（`portfolio_db`，10 张表）
 
 ### 3.1 stocks（≈5900 行）— 股票主数据（多来源合并统一视图）
 
@@ -149,6 +156,16 @@ my-finance-system/
 
 `stock_name`/`stock_code` · `current_eps`/`target_eps` · `current_pe`/`historical_avg_pe`/`mean_pe` · `hold_years` · `portfolio_count`/`max_industry_count` · `updated_at`。
 > 对应前端 Strategy.vue「Davis 双因子选股策略器」的输入参数，跨设备持久化；`epsYears`(3 年) 为前端硬编码常量不入库。由 `migrate_strategy.py` 建表（CREATE TABLE IF NOT EXISTS）。
+
+### 3.9 stock_fund_flow_daily（个股资金流向日表）
+
+联合主键 `code`(varchar) + `trade_date`(date) · `close_price`/`change_pct` · `main_net_inflow`/`main_net_ratio` · `super_net_inflow`/`large_net_inflow`/`medium_net_inflow`/`small_net_inflow` · `updated_at`。
+
+### 3.10 stock_lhb_daily（龙虎榜每日明细）
+
+联合主键 `code` + `trade_date` + `reason`(上榜原因) · `stock_name` · `lhb_net_buy`/`lhb_buy_amount`/`lhb_sell_amount` · `turnover_ratio`(成交占比%) · `inst_net_buy`(机构净买) · `seat_details`(jsonb，买卖前五席位+机构/北向标签) · `updated_at`。
+
+> 由 `migrate_fund_flow.py` 建表（CREATE TABLE IF NOT EXISTS）；席位明细仅对持仓/自选上榜个股按需拉取，机构净买额按「名称+买卖金额」三元组去重后对「机构专用」席位净额求和。
 
 ---
 
@@ -232,7 +249,20 @@ my-finance-system/
 | PUT / POST | `/api/strategy-config` | 整体 upsert（幂等，POST 为 PUT 别名） |
 | DELETE | `/api/strategy-config` | 重置为默认值 |
 
-### 4.9 系统
+### 4.9 资金流 / 龙虎榜（fund_flow.py）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/fund-flow/sync-portfolio` | 同步持仓+自选资金流（后台单例，重入 409） |
+| GET | `/api/fund-flow/sync-progress` | 资金流同步进度 |
+| GET | `/api/fund-flow/stock/{code}` | 单股近 60 日资金流 + 龙虎榜（缺/旧自动补拉） |
+| GET | `/api/fund-flow/mini-summary` | `codes=` 近 5 日主力净流入数组 + 5日累计 + 龙虎榜徽章 |
+| GET | `/api/fund-flow/market-rank` | `indicator=今日/5日/10日` 全市场主力净流入排行 |
+| POST | `/api/lhb/sync` | 龙虎榜同步（汇总 + 持仓/自选席位明细，重入 409） |
+| GET | `/api/lhb/progress` | 龙虎榜同步进度 |
+| GET | `/api/lhb/daily` | `instOnly=` 龙虎榜每日总览（含机构净买） |
+
+### 4.10 系统
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -304,6 +334,7 @@ python init_db.py
 python migrate_json.py      # 可选 --dry-run 先看清洗统计
 python migrate_stocks.py    # stocks 表字段平滑扩展（AKShare 行情/财报字段）
 python migrate_strategy.py  # strategy_config 表建表（选股策略配置）
+python migrate_fund_flow.py # 资金流/龙虎榜建表（stock_fund_flow_daily + stock_lhb_daily）
 
 # 2) 启动后端（端口 8000）
 uvicorn app.main:app --reload --port 8000

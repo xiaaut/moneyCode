@@ -1,5 +1,6 @@
 ﻿<script setup>
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
+import FundFlowSpark from './FundFlowSpark.vue';
 
 const props = defineProps({
   items: {
@@ -9,6 +10,26 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['remove-item', 'clear-all']);
+
+const fundSummary = ref({});
+
+async function loadFundSummary() {
+  const codes = (props.items || []).map(i => String(i.stockCode || '').trim()).filter(Boolean);
+  if (!codes.length) {
+    fundSummary.value = {};
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/fund-flow/mini-summary?codes=${encodeURIComponent(codes.join(','))}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    fundSummary.value = data?.items || {};
+  } catch {
+    // 忽略
+  }
+}
+
+watch(() => props.items, loadFundSummary, { immediate: true, deep: true });
 
 const sortedItems = computed(() => {
   return [...props.items].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -45,10 +66,16 @@ const formatDateTime = value => {
       <article v-for="item in sortedItems" :key="item.id" class="watch-card">
         <div class="card-head">
           <div>
-            <h4>{{ item.stockName || '未命名股票' }}（{{ item.stockCode || '-' }}）</h4>
+            <h4>
+              {{ item.stockName || '未命名股票' }}（{{ item.stockCode || '-' }}）
+              <el-tag v-if="fundSummary[item.stockCode]?.lhb" size="small" type="danger">🔥龙虎榜</el-tag>
+            </h4>
             <p>添加时间：{{ formatDateTime(item.createdAt) }}</p>
           </div>
-          <el-button link type="danger" @click="emit('remove-item', item.id)">删除</el-button>
+          <div class="head-right">
+            <FundFlowSpark :values="fundSummary[item.stockCode]?.mainNetInflow5 || []" :sum="fundSummary[item.stockCode]?.sum5 || 0" />
+            <el-button link type="danger" @click="emit('remove-item', item.id)">删除</el-button>
+          </div>
         </div>
 
         <div class="kpis">
@@ -120,6 +147,14 @@ const formatDateTime = value => {
   display: flex;
   justify-content: space-between;
   gap: 8px;
+}
+
+.head-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .card-head h4 {

@@ -54,6 +54,7 @@ CATEGORY_LABELS = {
 SORTABLE = {
     "code": Stock.code,
     "name": Stock.name,
+    "industry": Stock.industry,
     "pe_ttm": Stock.pe_ttm,
     "pb": Stock.pb,
     "roe": Stock.roe,

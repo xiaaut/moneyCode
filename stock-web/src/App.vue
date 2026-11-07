@@ -40,6 +40,10 @@
           <StateOwned />
         </template>
 
+        <template v-else-if="activeMenu === 'fundflow'">
+          <FundFlow />
+        </template>
+
         <template v-else-if="activeMenu === 'watchlist'">
           <WatchList :items="watchlistData" @remove-item="removeWatchlistItem" @clear-all="clearWatchlist" />
         </template>
@@ -73,6 +77,7 @@ import {
   Star,
   Document,
   Histogram,
+  Coin,
 } from '@element-plus/icons-vue';
 import Strategy from './components/Strategy.vue';
 import Positions from './components/Positions.vue';
@@ -82,6 +87,7 @@ import StateOwned from './components/StateOwned.vue';
 import WatchList from './components/WatchList.vue';
 import GridTrading from './components/GridTrading.vue';
 import AStockMarket from './components/AStockMarket.vue';
+import FundFlow from './components/FundFlow.vue';
 
 const WATCHLIST_API = '/api/watchlist';
 const PORTFOLIO_API = '/api/portfolio';
@@ -96,6 +102,7 @@ const sideMenus = [
   { key: 'market', label: 'A股全市场', icon: Histogram },
   { key: 'msci', label: 'MSCI数据', icon: DataAnalysis },
   { key: 'controller', label: '国资控股', icon: OfficeBuilding },
+  { key: 'fundflow', label: '资金与异动', icon: Coin },
   { key: 'strategy', label: '选股策略', icon: TrendCharts },
   { key: 'rebalance', label: '待调仓股票', icon: Sort },
   { key: 'watchlist', label: '观察列表', icon: Star },
@@ -109,6 +116,7 @@ const menuTitleMap = {
   market: 'A股全市场',
   msci: 'MSCI数据',
   controller: '国资控股',
+  fundflow: '资金与异动',
   rebalance: '待调仓股票',
   watchlist: '观察列表',
   grid: '网格交易',

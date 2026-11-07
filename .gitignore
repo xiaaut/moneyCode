@@ -8,6 +8,10 @@ stock-web/node_modules/
 stock-web/dist/
 stock-web/.vite/
 
+# 忽略 WorkBuddy 验证构建产生的临时打包产物
+dist-verify/
+**/dist-verify/
+
 # 后端工程
 stock-service/venv/
 stock-service/.venv/

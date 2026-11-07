@@ -2,7 +2,17 @@
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import controller, grid, msci, portfolio, quote, state_owned, stocks, strategy
+from app.api.v1.endpoints import (
+    controller,
+    fund_flow,
+    grid,
+    msci,
+    portfolio,
+    quote,
+    state_owned,
+    stocks,
+    strategy,
+)
 
 api_router = APIRouter()
 api_router.include_router(portfolio.router)
@@ -13,5 +23,6 @@ api_router.include_router(controller.router)
 api_router.include_router(msci.router)
 api_router.include_router(state_owned.router)
 api_router.include_router(strategy.router)
+api_router.include_router(fund_flow.router)
 
 __all__ = ["api_router"]
