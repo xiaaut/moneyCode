@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     # 逗号分隔的允许来源列表
     CORS_ORIGINS: str = "http://localhost:5173"
 
+    # ---------- 数据源（同花顺主通道 + 免费备用通道）----------
+    THS_API_KEY: str = ""
+    THS_BASE_URL: str = "https://fuyao.aicubes.cn"
+    # ths_first（默认）：同花顺优先，认证/权限/限流/上游异常时自动降级免费通道
+    # free_only：强制走东财/腾讯/AKShare 免费通道
+    DATA_SOURCE_MODE: str = "ths_first"
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def ASYNC_DATABASE_URL(self) -> str:

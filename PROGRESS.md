@@ -39,12 +39,17 @@ my-finance-system/
 │   ├── migrate_stocks.py             # stocks 表字段平滑扩展（ALTER TABLE ADD COLUMN IF NOT EXISTS，幂等）
 │   ├── migrate_strategy.py           # strategy_config 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   ├── migrate_fund_flow.py          # 资金流/龙虎榜建表（CREATE TABLE IF NOT EXISTS，幂等）
+│   ├── migrate_system_meta.py        # system_meta 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   └── app/
 │       ├── main.py                   # 入口：lifespan + CORS + 路由挂载 + 统一异常
-│       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池）
+│       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池、同花顺数据源）
 │       ├── db/
 │       │   ├── base.py               # DeclarativeBase + 约束命名规范
 │       │   └── session.py            # async engine + AsyncSession + get_db
+│       ├── adapters/                 # 数据源适配器层（主备双引擎）
+│       │   ├── ths_client.py         #   同花顺主通道（行情/估值/财务指标/基金，代码双向转换）
+│       │   ├── free_client.py        #   免费热备通道（东财 push2/腾讯/东财单股财务）
+│       │   └── data_router.py        #   主备路由器（ths_first 优先 + 异常自动降级 + source 标注）
 │       ├── models/                   # SQLAlchemy 2.0 模型（Mapped / mapped_column）
 │       │   ├── stock.py              #   stocks
 │       │   ├── portfolio.py          #   positions / trade_history
@@ -52,7 +57,8 @@ my-finance-system/
 │       │   ├── watchlist.py          #   watchlist_items
 │       │   ├── msci_meta.py          #   msci_meta（单例）
 │       │   ├── strategy.py           #   strategy_config（选股策略配置，单例）
-│       │   └── fund_flow.py          #   stock_fund_flow_daily / stock_lhb_daily
+│       │   ├── fund_flow.py          #   stock_fund_flow_daily / stock_lhb_daily
+│       │   └── system_meta.py        #   system_meta（系统元信息，单例）
 │       ├── schemas/                  # Pydantic 模型（camelCase 对齐前端）
 │       │   ├── common.py             #   CamelModel 基类 + 脏值转换工具
 │       │   ├── portfolio.py / grid.py / stocks.py / quote.py / strategy.py
@@ -63,6 +69,7 @@ my-finance-system/
 │       │   ├── akshare_sync.py       # AKShare 全市场同步引擎（asyncio.to_thread + 分批 upsert）
 │       │   ├── fund_flow.py          # 资金流/龙虎榜采集（to_thread + 防封限流 + 席位明细）
 │       │   ├── daily_sync.py         # 收盘一键更新（四合一异步流水线编排）
+│       │   ├── writeback.py          # 统一回写 stocks（防零值 + name 兜底 + coalesce）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
@@ -101,7 +108,7 @@ my-finance-system/
 
 ---
 
-## 3. NAS 数据库表结构（`portfolio_db`，10 张表）
+## 3. NAS 数据库表结构（`portfolio_db`，11 张表）
 
 ### 3.1 stocks（≈5900 行）— 股票主数据（多来源合并统一视图）
 
@@ -168,6 +175,12 @@ my-finance-system/
 联合主键 `code` + `trade_date` + `reason`(上榜原因) · `stock_name` · `lhb_net_buy`/`lhb_buy_amount`/`lhb_sell_amount` · `turnover_ratio`(成交占比%) · `inst_net_buy`(机构净买) · `seat_details`(jsonb，买卖前五席位+机构/北向标签) · `updated_at`。
 
 > 由 `migrate_fund_flow.py` 建表（CREATE TABLE IF NOT EXISTS）；席位明细仅对持仓/自选上榜个股按需拉取，机构净买额按「名称+买卖金额」三元组去重后对「机构专用」席位净额求和。
+
+### 3.11 system_meta（1 行，单例 id=1）— 系统元信息
+
+`last_daily_sync_at`（最近一次收盘一键更新完成时间）· `updated_at`。
+
+> 持久化「收盘一键更新」完成时间，避免进程重启后内存态丢失；由 `migrate_system_meta.py` 建表。`GET /api/system/daily-sync/progress` 按「内存 → system_meta → stocks 表 max(updated_at)」三级兜底返回 `last_completed_at`。
 
 ---
 
@@ -334,6 +347,18 @@ my-finance-system/
 
 > 已知限制：单实例部署下这些缓存与 Job 状态均在内存中，进程重启即失效（`state_owned` 的 `sourceStats` 也会丢失，`updatedAt` 有 `max(updated_at)` 兜底）。
 
+### 5.7 数据源主备双引擎（`app/adapters/`）
+
+同花顺官方 API（`fuyao.aicubes.cn`）为主通道，东财/腾讯/AKShare 免费接口为备用通道，实现「主备双活，主通道优先 + 异常自动降级」。
+
+- **配置**（`.env`）：`THS_API_KEY`、`THS_BASE_URL`（默认 `https://fuyao.aicubes.cn`）、`DATA_SOURCE_MODE`（`ths_first` 默认 / `free_only`）。
+- **主通道 `ths_client.py`**：行情快照 `prices/snapshot` + 估值快照 `valuations/snapshot`（pe_ttm/pb_mrq/name）+ 财务指标 `financials/indicators`（ROE/营收同比/净利同比/毛利率）+ 利润表 `income-statements`（basic_eps）+ 基金快照 `fund/market/snapshot`（ETF/LOF）。代码进出自动转换后缀（6/5→.SH，0/3/15/16/18→.SZ，4/8/92→.BJ），自动区分 A 股与场内基金。错误码 `2001/2003/3001/3004/4001/429/5001/5002/5003` 触发降级，`4001/5002/5003/429` 指数退避重试 3 次。
+- **热备 `free_client.py`**：封装原东财 push2/腾讯 qt.gtimg/东财 datacenter 财务；单股财务用东财 `RPT_F10_FINANCE_MAINFINADATA` 单股接口（EPSJB/ROEJQ/TOTALOPERATEREVETZ/PARENTNETPROFITTZ/XSMLL），替代原先「为 1 只股票拉全市场 5500 行」的慢逻辑。
+- **路由器 `data_router.py`**：暴露 `get_quotes / get_stock_name / get_single_financial_indicators`，按 `DATA_SOURCE_MODE` 执行主通道优先 + 降级，返回项标注 `source`（`ths` / `free_fallback`）。
+- **统一回写 `writeback.py`**：`/api/quote` 与 `/api/stocks/refresh-single/{code}` 获取有效行情（price>0）与 PE/PB/ROE/EPS 后统一回写 stocks 表，name 用 `nullif+coalesce` 兜底（新代码 INSERT 用 code、已有代码保留库内 name），彻底消除持仓/全市场/选股策略三页数据不一致。
+
+> 避坑：① 财务指标接口实际返回的 `index_id` 带 `calculate_`/`parent_holder_` 前缀（与文档示例略异），需用包含匹配；② 估值快照无市值、行情快照无 name/PE，需跨接口拼接；③ 基金快照不含名称，ETF 名称由 stocks 表已有值兜底。
+
 ---
 
 ## 6. 本地启动命令
@@ -352,6 +377,7 @@ python migrate_json.py      # 可选 --dry-run 先看清洗统计
 python migrate_stocks.py    # stocks 表字段平滑扩展（AKShare 行情/财报字段）
 python migrate_strategy.py  # strategy_config 表建表（选股策略配置）
 python migrate_fund_flow.py # 资金流/龙虎榜建表（stock_fund_flow_daily + stock_lhb_daily）
+python migrate_system_meta.py # system_meta 表建表（系统元信息，持久化收盘更新完成时间）
 
 # 2) 启动后端（端口 8000）
 uvicorn app.main:app --reload --port 8000

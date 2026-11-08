@@ -10,6 +10,7 @@ from app.models.portfolio import Position, TradeHistory
 from app.models.stock import Stock
 from app.models.strategy import StrategyConfig
 from app.models.fund_flow import StockFundFlowDaily, StockLhbDaily
+from app.models.system_meta import SystemMeta
 from app.models.watchlist import WatchlistItem
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "StrategyConfig",
     "StockFundFlowDaily",
     "StockLhbDaily",
+    "SystemMeta",
 ]

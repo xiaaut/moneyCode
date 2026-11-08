@@ -20,4 +20,11 @@ async def start_daily_sync(response: Response) -> dict:
 
 @router.get("/system/daily-sync/progress", summary="收盘一键更新进度")
 async def daily_sync_progress() -> dict:
-    return daily_sync.daily_state
+    state = daily_sync.daily_state
+    # 内存态丢失时依次兜底：system_meta 持久化值 → stocks 表最后更新时间
+    if not state.get("last_completed_at"):
+        last = await daily_sync.load_last_completed()
+        if not last:
+            last = await daily_sync.load_stocks_last_updated()
+        return {**state, "last_completed_at": last}
+    return state

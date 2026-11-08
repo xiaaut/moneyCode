@@ -10,15 +10,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import time
 
 from fastapi import APIRouter, Query, Response, status
 
+from app.adapters import data_router
+from app.db.session import AsyncSessionLocal
 from app.schemas.quote import QuoteResponse, RoeResponse, StockNameResponse
+from app.services import writeback
 from app.services.quotes import PREFIXED_CODE_RE, SECID_RE, quote_service, secid_of
 
 router = APIRouter(tags=["quote"])
+logger = logging.getLogger(__name__)
 
 CODE_RE = re.compile(r"^\d{6}$")
 
@@ -66,12 +72,28 @@ async def get_quote(
         response.status_code = status.HTTP_502_BAD_GATEWAY
         return QuoteResponse(diff=[], fetched_at=int(time.time() * 1000), message=error or "未能获取到行情数据")
 
+    # 后台回写：把有效行情统一落库 stocks（主备双引擎，不阻塞响应）
+    codes = list({secid.split(".")[1] for secid in unique if "." in secid})
+    if codes:
+        asyncio.create_task(_writeback_quotes(codes))
+
     return QuoteResponse(
         diff=diff,
         fetched_at=int(time.time() * 1000),
         stale=stale,
         message=f"行情接口暂不可用，已使用缓存数据（{error}）" if stale and error else "",
     )
+
+
+async def _writeback_quotes(codes: list[str]) -> None:
+    """后台回写行情到 stocks 表，失败仅记录日志不影响主流程。"""
+    try:
+        data = await data_router.get_quotes(codes)
+        async with AsyncSessionLocal() as session:
+            await writeback.writeback_bulk(session, data)
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("行情后台回写失败：%s", exc)
 
 
 @router.get("/roe", response_model=RoeResponse, summary="批量加权 ROE（东方财富）")

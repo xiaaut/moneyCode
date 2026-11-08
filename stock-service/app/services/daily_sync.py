@@ -18,10 +18,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.session import AsyncSessionLocal
-from app.models import Position
+from app.models import Position, Stock, SystemMeta
 from app.services import akshare_sync, fund_flow
 from app.services.quotes import quote_service
 
@@ -142,6 +143,44 @@ async def _run_step(index: int, fn: Callable[[], Awaitable[Any]]) -> None:
         daily_state["percent"] = sum(s["weight"] for s in daily_state["steps"][:index])
 
 
+async def _persist_last_completed() -> None:
+    """把最近完成时间持久化到 system_meta，避免进程重启丢失。"""
+    async with AsyncSessionLocal() as session:
+        statement = pg_insert(SystemMeta.__table__).values(
+            {"id": 1, "last_daily_sync_at": func.now()}
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=["id"],
+            set_={"last_daily_sync_at": func.now(), "updated_at": func.now()},
+        )
+        await session.execute(statement)
+        await session.commit()
+
+
+async def load_last_completed() -> str | None:
+    """从 system_meta 读取最近完成时间（内存态丢失时兜底）。"""
+    try:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(SystemMeta, 1)
+            if row and row.last_daily_sync_at:
+                return row.last_daily_sync_at.isoformat()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取 system_meta 失败：%s", exc)
+    return None
+
+
+async def load_stocks_last_updated() -> str | None:
+    """stocks 表最后更新时间（作为「上次更新」的最终兜底）。"""
+    try:
+        async with AsyncSessionLocal() as session:
+            ts = await session.scalar(select(func.max(Stock.updated_at)))
+            if ts:
+                return ts.isoformat()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取 stocks 更新时间失败：%s", exc)
+    return None
+
+
 async def run_daily_sync() -> None:
     global daily_state
     try:
@@ -157,3 +196,8 @@ async def run_daily_sync() -> None:
         daily_state["current_step"] = 0
         daily_state["percent"] = 100
         daily_state["last_completed_at"] = _now_iso()
+        # 持久化最近完成时间（不阻塞状态复位，失败仅记日志）
+        try:
+            await _persist_last_completed()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("持久化 last_completed_at 失败：%s", exc)
