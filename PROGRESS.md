@@ -40,6 +40,7 @@ my-finance-system/
 │   ├── migrate_strategy.py           # strategy_config 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   ├── migrate_fund_flow.py          # 资金流/龙虎榜建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   ├── migrate_system_meta.py        # system_meta 表建表（CREATE TABLE IF NOT EXISTS，幂等）
+│   ├── migrate_kline.py              # stock_kline_daily 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   └── app/
 │       ├── main.py                   # 入口：lifespan + CORS + 路由挂载 + 统一异常
 │       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池、同花顺数据源）
@@ -58,7 +59,8 @@ my-finance-system/
 │       │   ├── msci_meta.py          #   msci_meta（单例）
 │       │   ├── strategy.py           #   strategy_config（选股策略配置，单例）
 │       │   ├── fund_flow.py          #   stock_fund_flow_daily / stock_lhb_daily
-│       │   └── system_meta.py        #   system_meta（系统元信息，单例）
+│       │   ├── system_meta.py        #   system_meta（系统元信息，单例）
+│       │   └── kline.py              #   stock_kline_daily（全市场复权日线）
 │       ├── schemas/                  # Pydantic 模型（camelCase 对齐前端）
 │       │   ├── common.py             #   CamelModel 基类 + 脏值转换工具
 │       │   ├── portfolio.py / grid.py / stocks.py / quote.py / strategy.py
@@ -70,6 +72,8 @@ my-finance-system/
 │       │   ├── fund_flow.py          # 资金流/龙虎榜采集（to_thread + 防封限流 + 席位明细）
 │       │   ├── daily_sync.py         # 收盘一键更新（四合一异步流水线编排）
 │       │   ├── writeback.py          # 统一回写 stocks（防零值 + name 兜底 + coalesce）
+│       │   ├── kline_sync.py         # K线 Parquet 流式入库 + ETF 前复权日线补偿
+│       │   ├── grid_backtest.py      # 网格历史回测（防未来函数撮合 + 绩效指标）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
@@ -83,6 +87,7 @@ my-finance-system/
 │               ├── state_owned.py    # 国资扫描
 │               ├── strategy.py       # 选股策略配置
 │               ├── fund_flow.py      # 资金流 / 龙虎榜
+│               ├── kline.py          # K线同步（全市场 Parquet / ETF 日线）
 │               └── system.py         # 收盘一键更新
 │
 └── stock-web/                        # Vue3 前端
@@ -108,7 +113,7 @@ my-finance-system/
 
 ---
 
-## 3. NAS 数据库表结构（`portfolio_db`，11 张表）
+## 3. NAS 数据库表结构（`portfolio_db`，12 张表）
 
 ### 3.1 stocks（≈5900 行）— 股票主数据（多来源合并统一视图）
 
@@ -182,6 +187,12 @@ my-finance-system/
 
 > 持久化「收盘一键更新」完成时间，避免进程重启后内存态丢失；由 `migrate_system_meta.py` 建表。`GET /api/system/daily-sync/progress` 按「内存 → system_meta → stocks 表 max(updated_at)」三级兜底返回 `last_completed_at`。
 
+### 3.12 stock_kline_daily（全市场复权日线）
+
+联合主键 `code`(varchar) + `trade_date`(date)，另建 `trade_date` 索引 · `open`/`high`/`low`/`close`/`pre_close`(NUMERIC 10,3) · `volume`/`amount`(NUMERIC 18,2) · `turnover_ratio`(NUMERIC 6,3) · `adjust_factor`(NUMERIC 10,4) · `qfq_close`(前复权收盘) · `updated_at`。
+
+> 由 `migrate_kline.py` 建表。A 股来自同花顺 market-dumps Parquet（`/api/dump/market-dumps/{daily-k,daily-k-10d}/download-url` 拿预签名链接，pyarrow `iter_batches` 分块流式入库），ETF 来自 `/api/fund/market/historical`（前复权日线）。
+
 ---
 
 ## 4. FastAPI 接口路由清单
@@ -224,8 +235,18 @@ my-finance-system/
 | POST | `/api/grid` | 对象=按 id upsert；数组=整体覆盖；自动重算 step/摊薄成本/套利 |
 | POST | `/api/grid/{strategy_id}/trades` | 档位成交打卡（重算 current_shares/diluted_cost/realized_profit） |
 | DELETE | `/api/grid/{strategy_id}` | 删除策略（级联删成交） |
+| POST | `/api/grid/backtest` | 网格历史回测（code/start_date/end_date/initial_cash/base_price/step_pct/grid_amount/max_grids/commission_rate），返回绩效指标 + 每日净值 + 交易流水 |
 
-### 4.4 行情（quote.py）
+### 4.4 K 线同步（kline.py）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/kline/sync-historical` | 全市场 10 年日 K Parquet 全量同步（后台单例，重入 409） |
+| GET | `/api/kline/sync-historical/progress` | 全量同步进度（phase/done/total/耗时） |
+| POST | `/api/kline/sync-incremental` | 近 10 交易日日 K 增量同步 |
+| POST | `/api/kline/sync-etf/{code}` | 单只 ETF 前复权日线补偿（`years=` 默认 5） |
+
+### 4.5 行情（quote.py）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -378,6 +399,7 @@ python migrate_stocks.py    # stocks 表字段平滑扩展（AKShare 行情/财�
 python migrate_strategy.py  # strategy_config 表建表（选股策略配置）
 python migrate_fund_flow.py # 资金流/龙虎榜建表（stock_fund_flow_daily + stock_lhb_daily）
 python migrate_system_meta.py # system_meta 表建表（系统元信息，持久化收盘更新完成时间）
+python migrate_kline.py     # stock_kline_daily 表建表（全市场复权日线）
 
 # 2) 启动后端（端口 8000）
 uvicorn app.main:app --reload --port 8000

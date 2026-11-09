@@ -6,6 +6,7 @@ from app.api.v1.endpoints import (
     controller,
     fund_flow,
     grid,
+    kline,
     msci,
     portfolio,
     quote,
@@ -26,5 +27,6 @@ api_router.include_router(state_owned.router)
 api_router.include_router(strategy.router)
 api_router.include_router(fund_flow.router)
 api_router.include_router(system.router)
+api_router.include_router(kline.router)
 
 __all__ = ["api_router"]

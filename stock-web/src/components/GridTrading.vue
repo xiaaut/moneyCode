@@ -616,6 +616,117 @@ async function deleteTrade(row) {
   ElMessage.success('已删除该笔成交');
 }
 
+/* ---------------- 历史回测 ---------------- */
+
+const backtestDialog = reactive({ visible: false });
+const backtestForm = reactive({
+  code: '',
+  basePrice: 0,
+  stepPct: 1.0,
+  gridAmount: 10000,
+  maxGrids: 10,
+  initialCash: 100000,
+  commissionRate: 0.0001,
+  range: '2y',
+  startDate: '',
+  endDate: '',
+});
+const backtestLoading = ref(false);
+const backtestResult = ref(null);
+
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+function formatDateStr(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function setBacktestRange(range) {
+  backtestForm.range = range;
+  if (range === 'custom') return;
+  const end = new Date();
+  const years = range === '1y' ? 1 : range === '2y' ? 2 : 3;
+  const start = new Date(end.getTime());
+  start.setFullYear(start.getFullYear() - years);
+  backtestForm.startDate = formatDateStr(start);
+  backtestForm.endDate = formatDateStr(end);
+}
+
+function openBacktest() {
+  const code = String(form.symbol || '').trim();
+  if (!/^\d{6}$/.test(code)) {
+    ElMessage.warning('请先填写 6 位股票代码');
+    return;
+  }
+  backtestForm.code = code;
+  backtestForm.basePrice = num(form.basePrice) || num(effectivePrice.value) || 0;
+  backtestForm.stepPct = 1.0;
+  backtestForm.gridAmount = 10000;
+  backtestForm.maxGrids = Math.max(1, Math.round(num(form.gridCount))) || 10;
+  backtestForm.initialCash = 100000;
+  backtestForm.commissionRate = num(form.commissionRate) || 0.0001;
+  setBacktestRange('2y');
+  backtestResult.value = null;
+  backtestDialog.visible = true;
+}
+
+async function runBacktest() {
+  if (!(num(backtestForm.basePrice) > 0)) {
+    ElMessage.warning('请填写基准价');
+    return;
+  }
+  backtestLoading.value = true;
+  backtestResult.value = null;
+  try {
+    const resp = await fetch('/api/grid/backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: backtestForm.code,
+        start_date: backtestForm.startDate,
+        end_date: backtestForm.endDate,
+        initial_cash: num(backtestForm.initialCash),
+        base_price: num(backtestForm.basePrice),
+        step_pct: num(backtestForm.stepPct),
+        grid_amount: num(backtestForm.gridAmount),
+        max_grids: Math.round(num(backtestForm.maxGrids)),
+        commission_rate: num(backtestForm.commissionRate),
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data?.detail || `HTTP ${resp.status}`);
+    backtestResult.value = data;
+  } catch (error) {
+    ElMessage.error(`回测失败：${error.message || error}`);
+  } finally {
+    backtestLoading.value = false;
+  }
+}
+
+const backtestChart = computed(() => {
+  if (!backtestResult.value) return null;
+  const eq = backtestResult.value.equity || [];
+  const bench = backtestResult.value.benchmark_equity || [];
+  if (!eq.length) return null;
+  const base = eq[0].total_equity || 1;
+  const W = 660;
+  const H = 280;
+  const PAD = { l: 44, r: 12, t: 14, b: 26 };
+  const innerW = W - PAD.l - PAD.r;
+  const innerH = H - PAD.t - PAD.b;
+  const gridVals = eq.map(e => e.total_equity / base);
+  const benchVals = bench.map(e => e.total_equity / base);
+  const all = benchVals.length ? [...gridVals, ...benchVals] : gridVals;
+  const minV = Math.min(...all);
+  const maxV = Math.max(...all);
+  const range = maxV - minV || 1;
+  const x = i => PAD.l + (i / Math.max(eq.length - 1, 1)) * innerW;
+  const y = v => PAD.t + (1 - (v - minV) / range) * innerH;
+  const gridPath = gridVals.map((v, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const benchPath = benchVals.map((v, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return { W, H, gridPath, benchPath, minV, maxV, hasBench: !!benchVals.length };
+});
+
 onMounted(loadStrategies);
 </script>
 
@@ -662,8 +773,13 @@ onMounted(loadStrategies);
     <el-card shadow="never" class="panel">
       <template #header>
         <div class="panel-header">
-          <span>策略参数</span>
-          <span v-if="currentStrategy" class="panel-tag">已保存 · {{ currentStrategy.symbol }}</span>
+          <div class="panel-header-left">
+            <span>策略参数</span>
+            <span v-if="currentStrategy" class="panel-tag">已保存 · {{ currentStrategy.symbol }}</span>
+          </div>
+          <el-button class="backtest-trigger" size="small" type="warning" plain @click="openBacktest">
+            📊 历史回测验证
+          </el-button>
         </div>
       </template>
 
@@ -1047,6 +1163,122 @@ onMounted(loadStrategies);
         <el-button type="primary" :loading="tradeSubmitting" @click="submitTrade">确认记录</el-button>
       </template>
     </el-dialog>
+
+    <!-- 历史回测抽屉 -->
+    <el-drawer v-model="backtestDialog.visible" title="网格历史回测" size="700px">
+      <div class="backtest-body">
+        <el-form label-width="88px" size="small" class="backtest-form">
+          <el-form-item label="标的代码">
+            <el-input :model-value="backtestForm.code" disabled style="width: 160px" />
+          </el-form-item>
+          <div class="backtest-grid">
+            <el-form-item label="基准价(元)">
+              <el-input-number v-model="backtestForm.basePrice" :min="0" :precision="3" :step="0.01" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="步长(%)">
+              <el-input-number v-model="backtestForm.stepPct" :min="0.1" :precision="2" :step="0.1" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="单格金额(元)">
+              <el-input-number v-model="backtestForm.gridAmount" :min="100" :step="1000" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="最大网格数">
+              <el-input-number v-model="backtestForm.maxGrids" :min="1" :max="100" :step="1" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="初始资金(元)">
+              <el-input-number v-model="backtestForm.initialCash" :min="1000" :step="10000" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="佣金费率">
+              <el-input-number v-model="backtestForm.commissionRate" :min="0" :precision="4" :step="0.0001" style="width: 100%" />
+            </el-form-item>
+          </div>
+          <el-form-item label="时间范围">
+            <el-radio-group v-model="backtestForm.range" @change="setBacktestRange">
+              <el-radio-button value="1y">近1年</el-radio-button>
+              <el-radio-button value="2y">近2年</el-radio-button>
+              <el-radio-button value="3y">近3年</el-radio-button>
+              <el-radio-button value="custom">自定义</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="起止日期">
+            <el-date-picker v-model="backtestForm.startDate" type="date" value-format="YYYY-MM-DD" placeholder="开始" style="width: 150px" @change="backtestForm.range = 'custom'" />
+            <span class="backtest-sep">~</span>
+            <el-date-picker v-model="backtestForm.endDate" type="date" value-format="YYYY-MM-DD" placeholder="结束" style="width: 150px" @change="backtestForm.range = 'custom'" />
+          </el-form-item>
+        </el-form>
+
+        <div class="backtest-actions">
+          <el-button type="primary" :loading="backtestLoading" @click="runBacktest">开始回测</el-button>
+          <span v-if="backtestLoading" class="backtest-loading-tip">正在读取日线并逐日撮合…</span>
+        </div>
+
+        <div v-loading="backtestLoading" class="backtest-result">
+          <template v-if="backtestResult">
+            <div class="backtest-cards">
+              <div class="backtest-card">
+                <div class="btc-label">网格累计收益率</div>
+                <div :class="['btc-value', backtestResult.metrics.total_return_pct >= 0 ? 'profit-up' : 'profit-down']">
+                  {{ backtestResult.metrics.total_return_pct > 0 ? '+' : '' }}{{ backtestResult.metrics.total_return_pct }}%
+                </div>
+                <div class="btc-sub">基准 {{ backtestResult.metrics.benchmark_return_pct > 0 ? '+' : '' }}{{ backtestResult.metrics.benchmark_return_pct }}%</div>
+              </div>
+              <div class="backtest-card">
+                <div class="btc-label">年化收益率</div>
+                <div :class="['btc-value', backtestResult.metrics.annualized_return_pct >= 0 ? 'profit-up' : 'profit-down']">
+                  {{ backtestResult.metrics.annualized_return_pct > 0 ? '+' : '' }}{{ backtestResult.metrics.annualized_return_pct }}%
+                </div>
+                <div class="btc-sub">超额 {{ backtestResult.metrics.excess_return_pct > 0 ? '+' : '' }}{{ backtestResult.metrics.excess_return_pct }}%</div>
+              </div>
+              <div class="backtest-card">
+                <div class="btc-label">最大回撤</div>
+                <div class="btc-value profit-down">-{{ backtestResult.metrics.max_drawdown_pct }}%</div>
+                <div class="btc-sub">基准 -{{ backtestResult.metrics.benchmark_max_drawdown_pct }}%</div>
+              </div>
+              <div class="backtest-card">
+                <div class="btc-label">成功套利次数</div>
+                <div class="btc-value">{{ backtestResult.metrics.arbitrage_count }}</div>
+                <div class="btc-sub">落袋利润 ¥{{ fmtMoney(backtestResult.metrics.total_profit) }}</div>
+              </div>
+            </div>
+
+            <div v-if="backtestChart" class="backtest-chart">
+              <div class="backtest-chart-title">净值对比（网格 vs 买入持有）</div>
+              <svg :viewBox="`0 0 ${backtestChart.W} ${backtestChart.H}`" class="backtest-svg" preserveAspectRatio="xMidYMid meet">
+                <path v-if="backtestChart.hasBench" :d="backtestChart.benchPath" fill="none" stroke="#9aa7b5" stroke-width="1.5" stroke-dasharray="5,4" />
+                <path :d="backtestChart.gridPath" fill="none" stroke="#e34d4d" stroke-width="2" />
+              </svg>
+              <div class="backtest-legend">
+                <span><i class="dot grid"></i>网格策略</span>
+                <span v-if="backtestChart.hasBench"><i class="dot bench"></i>买入持有</span>
+              </div>
+            </div>
+
+            <div v-if="backtestResult.trades && backtestResult.trades.length" class="backtest-trades">
+              <div class="backtest-chart-title">交易流水明细（{{ backtestResult.trades.length }} 笔）</div>
+              <el-table :data="backtestResult.trades" size="small" border max-height="260">
+                <el-table-column prop="date" label="日期" width="110" />
+                <el-table-column label="方向" width="70" align="center">
+                  <template #default="scope">
+                    <span :class="scope.row.side === 'BUY' ? 'trade-buy' : 'trade-sell'">{{ scope.row.side === 'BUY' ? '买入' : '卖出' }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="price" label="成交价" width="90" align="right" />
+                <el-table-column prop="shares" label="股数" width="90" align="right" />
+                <el-table-column prop="amount" label="成交金额" width="110" align="right" />
+                <el-table-column prop="fee" label="手续费" width="80" align="right" />
+                <el-table-column label="层级" width="60" align="center" prop="level" />
+                <el-table-column label="本笔获利" min-width="90" align="right">
+                  <template #default="scope">
+                    <span v-if="scope.row.profit != null" :class="scope.row.profit >= 0 ? 'profit-up' : 'profit-down'">¥{{ fmtMoney(scope.row.profit) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </template>
+          <el-empty v-else-if="!backtestLoading" description="填写参数后点击「开始回测」" :image-size="60" />
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -1123,6 +1355,12 @@ onMounted(loadStrategies);
   font-size: 1.02rem;
   font-weight: 700;
   color: #2b3f55;
+}
+
+.panel-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .panel-tag {
@@ -1379,6 +1617,119 @@ onMounted(loadStrategies);
 
   .grid-toolbar {
     align-items: flex-start;
+  }
+}
+
+/* ---- 历史回测 ---- */
+.backtest-body {
+  padding: 0 4px;
+}
+
+.backtest-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 18px;
+}
+
+.backtest-sep {
+  margin: 0 8px;
+  color: #9aa7b5;
+}
+
+.backtest-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 16px;
+}
+
+.backtest-loading-tip {
+  font-size: 0.82rem;
+  color: #6b8099;
+}
+
+.backtest-result {
+  min-height: 120px;
+}
+
+.backtest-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.backtest-card {
+  padding: 12px;
+  border: 1px solid #e2eaf2;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.btc-label {
+  font-size: 0.78rem;
+  color: #6b8099;
+}
+
+.btc-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 4px 0 2px;
+}
+
+.btc-sub {
+  font-size: 0.76rem;
+  color: #8a9db0;
+}
+
+.backtest-chart {
+  margin-bottom: 16px;
+}
+
+.backtest-chart-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #2b3f55;
+  margin-bottom: 8px;
+}
+
+.backtest-svg {
+  width: 100%;
+  height: auto;
+  border: 1px solid #e6edf4;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.backtest-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: #5a738c;
+}
+
+.dot.grid {
+  background: #e34d4d;
+}
+
+.dot.bench {
+  background: #9aa7b5;
+}
+
+.trade-buy {
+  color: #e64545;
+  font-weight: 600;
+}
+
+.trade-sell {
+  color: #1fa971;
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .backtest-cards {
+    grid-template-columns: repeat(2, 1fr);
   }
 }
 </style>

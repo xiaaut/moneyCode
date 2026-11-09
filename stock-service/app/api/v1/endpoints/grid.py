@@ -11,11 +11,12 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from app.db.session import get_db
 from app.models import GridStrategy, GridTradeRecord
 from app.schemas.common import OkResponse, parse_number
 from app.schemas.grid import GridSaveResponse, GridStrategyIn, GridStrategyOut, GridTradeIn, GridTradeOut
+from app.services import grid_backtest as grid_backtest_service
 
 router = APIRouter(tags=["grid"])
 
@@ -389,6 +391,54 @@ async def delete_grid(strategy_id: str, db: AsyncSession = Depends(get_db)) -> G
     await db.delete(strategy)
     await db.commit()
     return GridDeleteResponse(deleted=strategy_id, message="策略及其成交记录已删除")
+
+
+class GridBacktestIn(BaseModel):
+    """网格历史回测入参。"""
+
+    code: str
+    start_date: str
+    end_date: str
+    initial_cash: float = Field(100000, gt=0, description="初始现金")
+    base_price: float = Field(..., gt=0, description="基准价")
+    step_pct: float = Field(1.0, gt=0, description="步长百分比，如 1.0 表示 1%")
+    grid_amount: float = Field(10000, gt=0, description="单格金额（元）")
+    max_grids: int = Field(10, ge=1, le=100, description="最大网格数")
+    commission_rate: float = Field(0.0001, ge=0, description="佣金费率")
+
+
+@router.post("/grid/backtest", summary="网格历史回测")
+async def run_grid_backtest(payload: GridBacktestIn) -> dict:
+    code = "".join(ch for ch in payload.code if ch.isdigit())[-6:]
+    if len(code) != 6:
+        raise HTTPException(status_code=400, detail="code 必须是 6 位股票代码")
+
+    try:
+        start = date.fromisoformat(payload.start_date)
+        end = date.fromisoformat(payload.end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD") from exc
+    if start > end:
+        raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
+
+    klines = await grid_backtest_service.load_klines(code, start, end)
+    if not klines:
+        raise HTTPException(status_code=404, detail=f"无 K 线数据：{code}，请先同步日线")
+
+    return grid_backtest_service.run_backtest(
+        klines,
+        {
+            "code": code,
+            "start_date": payload.start_date,
+            "end_date": payload.end_date,
+            "initial_cash": payload.initial_cash,
+            "base_price": payload.base_price,
+            "step_pct": payload.step_pct,
+            "grid_amount": payload.grid_amount,
+            "max_grids": payload.max_grids,
+            "commission_rate": payload.commission_rate,
+        },
+    )
 
 
 __all__ = ["router", "compute_metrics"]
