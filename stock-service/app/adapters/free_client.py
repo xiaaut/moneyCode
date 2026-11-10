@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from datetime import date
 from typing import Any
 
 import httpx
@@ -155,6 +157,165 @@ class FreeClient:
             "gross_margin": _num(row.get("XSMLL")),
             "report_period": _report_name_to_q(row.get("REPORT_DATE_NAME")),
         }
+
+    # ------------------------------------------------------------------ #
+    # 三表（东财 F10 完整字段）
+    # ------------------------------------------------------------------ #
+    async def get_financial_statements(
+        self, code: str, mode: str = "annual", limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """东财 F10 三表多期序列，映射为标准字段字典（字段完整，覆盖张氏分析）。"""
+        income, balance, cashflow = await asyncio.gather(
+            self._fetch_em_table("RPT_F10_FINANCE_GINCOME", code),
+            self._fetch_em_table("RPT_F10_FINANCE_GBALANCE", code),
+            self._fetch_em_table("RPT_F10_FINANCE_GCASHFLOW", code),
+        )
+
+        # 按 report_date 对齐三表
+        merged: dict[str, dict[str, Any]] = {}
+        for row in income:
+            rd = _report_date_of(row)
+            if rd:
+                merged.setdefault(rd, {"code": code, "report_date": rd, "source": "free"})
+                _map_em(merged[rd], row, EM_INCOME_MAP)
+                merged[rd]["report_label"] = str(row.get("REPORT_DATE_NAME") or "")
+        for row in balance:
+            rd = _report_date_of(row)
+            if rd and rd in merged:
+                _map_em(merged[rd], row, EM_BALANCE_MAP)
+        for row in cashflow:
+            rd = _report_date_of(row)
+            if rd and rd in merged:
+                _map_em(merged[rd], row, EM_CASHFLOW_MAP)
+
+        items = sorted(merged.values(), key=lambda x: x["report_date"], reverse=True)
+        for item in items:
+            item["report_type"] = "annual" if item["report_date"].month == 12 else "periodic"
+
+        if mode == "annual":
+            annual = [x for x in items if x["report_type"] == "annual"][:limit]
+            periodic = [x for x in items if x["report_type"] == "periodic"][:2]
+            return sorted(annual + periodic, key=lambda x: x["report_date"], reverse=True)
+        return items[:limit]
+
+    async def _fetch_em_table(self, report_name: str, code: str) -> list[dict[str, Any]]:
+        params = {
+            "reportName": report_name,
+            "columns": "ALL",
+            "filter": f'(SECURITY_CODE="{code}")',
+            "sortColumns": "REPORT_DATE",
+            "sortTypes": "-1",
+            "pageNumber": "1",
+            "pageSize": "20",
+            "source": "HSF10",
+            "client": "PC",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT, headers=BASE_HEADERS) as client:
+                resp = await client.get(
+                    FINANCE_URL, params=params, headers={"Referer": "https://data.eastmoney.com/"}
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("东财三表请求失败 %s %s: %s", code, report_name, exc)
+            return []
+        return ((payload or {}).get("result") or {}).get("data") or []
+
+
+def _report_date_of(row: dict[str, Any]) -> date | None:
+    value = str(row.get("REPORT_DATE") or "")
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _map_em(target: dict[str, Any], row: dict[str, Any], mapping: dict[str, str]) -> None:
+    for field, em_key in mapping.items():
+        value = _num(row.get(em_key))
+        if value is not None:
+            target[field] = value
+
+
+# 东财 F10 三表字段 -> 标准字段名
+EM_INCOME_MAP = {
+    "total_revenue": "TOTAL_OPERATE_INCOME",
+    "revenue": "OPERATE_INCOME",
+    "operating_cost": "OPERATE_COST",
+    "tax_and_surcharge": "OPERATE_TAX_ADD",
+    "selling_expense": "SALE_EXPENSE",
+    "admin_expense": "MANAGE_EXPENSE",
+    "rd_expense": "RESEARCH_EXPENSE",
+    "financial_expense": "FINANCE_EXPENSE",
+    "interest_expense": "INTEREST_EXPENSE",
+    "interest_income": "INTEREST_INCOME",
+    "other_income": "OTHER_INCOME",
+    "investment_income": "INVEST_INCOME",
+    "fair_value_change_income": "FAIRVALUE_CHANGE_INCOME",
+    "asset_disposal_income": "ASSET_DISPOSAL_INCOME",
+    "asset_impairment_loss": "ASSET_IMPAIRMENT_LOSS",
+    "credit_impairment_loss": "CREDIT_IMPAIRMENT_LOSS",
+    "operating_profit": "OPERATE_PROFIT",
+    "total_profit": "TOTAL_PROFIT",
+    "net_profit": "NETPROFIT",
+    "parent_net_profit": "PARENT_NETPROFIT",
+    "deduct_parent_net_profit": "DEDUCT_PARENT_NETPROFIT",
+}
+
+EM_BALANCE_MAP = {
+    "monetary_funds": "MONETARYFUNDS",
+    "trading_financial_assets": "TRADE_FINASSET",
+    "other_current_assets": "OTHER_CURRENT_ASSET",
+    "notes_and_accounts_receivable": "NOTE_ACCOUNTS_RECE",
+    "accounts_receivable": "ACCOUNTS_RECE",
+    "notes_receivable": "NOTE_RECE",
+    "prepayments": "PREPAYMENT",
+    "other_receivables": "OTHER_RECE",
+    "inventories": "INVENTORY",
+    "fixed_assets": "FIXED_ASSET",
+    "construction_in_progress": "CIP",
+    "intangible_assets": "INTANGIBLE_ASSET",
+    "dev_expenditure": "DEVELOP_EXPENSE",
+    "long_term_equity_investment": "LONG_EQUITY_INVEST",
+    "goodwill": "GOODWILL",
+    "total_current_assets": "TOTAL_CURRENT_ASSETS",
+    "total_assets": "TOTAL_ASSETS",
+    "short_term_loans": "SHORT_LOAN",
+    "notes_and_accounts_payable": "NOTE_ACCOUNTS_PAYABLE",
+    "contract_liabilities": "CONTRACT_LIAB",
+    "advance_receipts": "ADVANCE_RECEIVABLES",
+    "employee_benefits_payable": "STAFF_SALARY_PAYABLE",
+    "taxes_payable": "TAX_PAYABLE",
+    "other_payables": "OTHER_PAYABLE",
+    "interest_payable": "INTEREST_PAYABLE",
+    "non_current_liabilities_due_1y": "NONCURRENT_LIAB_1YEAR",
+    "long_term_loans": "LONG_LOAN",
+    "bonds_payable": "BOND_PAYABLE",
+    "lease_liabilities": "LEASE_LIAB",
+    "total_current_liabilities": "TOTAL_CURRENT_LIAB",
+    "total_liabilities": "TOTAL_LIABILITIES",
+    "paid_in_capital": "SHARE_CAPITAL",
+    "capital_reserve": "CAPITAL_RESERVE",
+    "surplus_reserve": "SURPLUS_RESERVE",
+    "undistributed_profit": "UNASSIGN_RPOFIT",
+    "minority_equity": "MINORITY_EQUITY",
+    "parent_equity": "TOTAL_PARENT_EQUITY",
+    "total_equity": "TOTAL_EQUITY",
+}
+
+EM_CASHFLOW_MAP = {
+    "operating_cash_inflow": "TOTAL_OPERATE_INFLOW",
+    "operating_cash_outflow": "TOTAL_OPERATE_OUTFLOW",
+    "net_operating_cash_flow": "NETCASH_OPERATE",
+    "capex_cash_outflow": "CONSTRUCT_LONG_ASSET",
+    "net_investing_cash_flow": "NETCASH_INVEST",
+    "borrowings_cash_inflow": "BORROW_FUND_ADD",
+    "debt_repayment_cash_outflow": "PAY_DEBT_CASH",
+    "dividend_interest_cash_outflow": "ASSIGN_DIVIDEND_PORFIT",
+    "net_financing_cash_flow": "NETCASH_FINANCE",
+    "net_cash_increase": "CCE_ADD",
+}
 
 
 free_client = FreeClient()

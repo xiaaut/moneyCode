@@ -356,6 +356,115 @@ class ThsClient:
                 return eps
         return None
 
+    # ------------------------------------------------------------------ #
+    # 三表（同花顺简化字段）
+    # ------------------------------------------------------------------ #
+    async def get_financial_statements(
+        self, code: str, mode: str = "annual", limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """同花顺三表多期序列，映射为标准字段字典（字段为简化版，缺项由路由器补全）。"""
+        ths_code = to_ths_code(code)
+
+        annual_income, annual_balance, annual_cash, quarterly_income = await asyncio.gather(
+            self._fetch_ths_table("/api/a-share/financials/income-statements", ths_code, "annual", limit),
+            self._fetch_ths_table("/api/a-share/financials/balance-sheets", ths_code, "annual", limit),
+            self._fetch_ths_table("/api/a-share/financials/cash-flow-statements", ths_code, "annual", limit),
+            self._fetch_ths_table("/api/a-share/financials/income-statements", ths_code, "quarterly", 2),
+        )
+
+        merged: dict[str, dict[str, Any]] = {}
+        for row in annual_income:
+            rd = _ths_report_date(row)
+            if rd:
+                merged.setdefault(rd, {"code": code, "report_date": rd, "source": "ths"})
+                _map_ths(merged[rd], row, THS_INCOME_MAP)
+                merged[rd]["report_label"] = _ths_label(row)
+        for row in annual_balance:
+            rd = _ths_report_date(row)
+            if rd and rd in merged:
+                _map_ths(merged[rd], row, THS_BALANCE_MAP)
+        for row in annual_cash:
+            rd = _ths_report_date(row)
+            if rd and rd in merged:
+                _map_ths(merged[rd], row, THS_CASHFLOW_MAP)
+        # 季报/中报拐点（仅利润表补营业收入等关键项）
+        for row in quarterly_income:
+            rd = _ths_report_date(row)
+            if rd and rd not in merged:
+                merged.setdefault(rd, {"code": code, "report_date": rd, "source": "ths"})
+                _map_ths(merged[rd], row, THS_INCOME_MAP)
+                merged[rd]["report_label"] = _ths_label(row)
+
+        items = sorted(merged.values(), key=lambda x: x["report_date"], reverse=True)
+        for item in items:
+            item["report_type"] = "annual" if item["report_date"].month == 12 else "periodic"
+        return items
+
+    async def _fetch_ths_table(self, path: str, ths_code: str, period: str, limit: int) -> list[dict[str, Any]]:
+        data = await self._request_or_fail(
+            path, {"thscode": ths_code, "period": period, "limit": limit}
+        )
+        return (data or {}).get("item") or []
+
+
+def _ths_report_date(row: dict[str, Any]) -> Any:
+    from datetime import date, timezone, timedelta
+
+    ms = row.get("period_end_ms")
+    if not ms:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone(timedelta(hours=8))).date()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _ths_label(row: dict[str, Any]) -> str:
+    year = row.get("fiscal_year") or ""
+    period = row.get("fiscal_period") or ""
+    qmap = {"FY": "年报", "Q1": "一季报", "Q2": "中报", "Q3": "三季报", "Q4": "年报"}
+    return f"{year}{qmap.get(period, period)}"
+
+
+def _map_ths(target: dict[str, Any], row: dict[str, Any], mapping: dict[str, str]) -> None:
+    for field, ths_key in mapping.items():
+        value = _num(row.get(ths_key))
+        if value is not None:
+            target[field] = value
+
+
+THS_INCOME_MAP = {
+    "total_revenue": "operating_income",
+    "revenue": "operating_income",
+    "operating_cost": "operating_costs",
+    "selling_expense": "sales_fee",
+    "admin_expense": "manage_fee",
+    "rd_expense": "research_and_development_expenses",
+    "interest_expense": "interest_expenses",
+    "operating_profit": "operating_profit",
+    "total_profit": "profit_total",
+    "net_profit": "net_profit",
+    "parent_net_profit": "parent_holder_net_profit",
+}
+
+THS_BALANCE_MAP = {
+    "monetary_funds": "cash",
+    "accounts_receivable": "accounts_receivable",
+    "total_current_assets": "total_current_assets",
+    "total_assets": "assets_total",
+    "total_liabilities": "total_debt",
+    "total_equity": "holder_equity_total",
+}
+
+THS_CASHFLOW_MAP = {
+    "net_operating_cash_flow": "act_cash_flow_net",
+    "net_investing_cash_flow": "invest_cash_flow_net",
+    "net_financing_cash_flow": "financing_cash_flow_net",
+    "capex_cash_outflow": "pay_fixed_assets_etc_cash",
+    "dividend_interest_cash_outflow": "pay_dividends_profits_interest_cash",
+    "net_cash_increase": "cash_equivalents_net_addition",
+}
+
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[i : i + size] for i in range(0, len(items), size)]

@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     controller,
+    financials,
     fund_flow,
     grid,
     kline,
@@ -28,5 +29,6 @@ api_router.include_router(strategy.router)
 api_router.include_router(fund_flow.router)
 api_router.include_router(system.router)
 api_router.include_router(kline.router)
+api_router.include_router(financials.router)
 
 __all__ = ["api_router"]

@@ -875,6 +875,7 @@ onMounted(() => {
 
 // 收盘一键更新完成后自动刷新
 const appRefreshSignal = inject('appRefreshSignal', ref(0));
+const openAnalysisReport = inject('openAnalysisReport', () => {});
 watch(appRefreshSignal, () => {
   void loadTableDataFromFile().then(() => {
     refreshDerivedFields(false);
@@ -898,7 +899,10 @@ watch(appRefreshSignal, () => {
       <el-table-column prop="code" label="股票代码" width="100" align="center" fixed />
       <el-table-column prop="name" label="股票名称" width="150" align="center" fixed>
         <template #default="scope">
-          {{ scope.row.name }}
+          <span class="name-cell" @click="openAnalysisReport(scope.row.code)" title="点击查看财报透视">
+            {{ scope.row.name }}
+            <span class="name-report-icon">📊</span>
+          </span>
           <el-tag v-if="fundSummary[scope.row.code]?.lhb" size="small" type="danger" style="margin-left:4px">🔥龙虎榜</el-tag>
         </template>
       </el-table-column>
@@ -1329,6 +1333,20 @@ watch(appRefreshSignal, () => {
 
 .import-bad {
   color: #d17057;
+}
+
+.name-cell {
+  cursor: pointer;
+  font-weight: 600;
+  color: #21384f;
+}
+.name-cell:hover {
+  color: #1d4ed8;
+}
+.name-report-icon {
+  font-size: 0.72rem;
+  opacity: 0.7;
+  margin-left: 2px;
 }
 
 </style>

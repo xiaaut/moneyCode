@@ -6,6 +6,7 @@ init_db / Alembic 无需逐个模块查找。
 
 from app.models.grid import GridStrategy, GridTradeRecord
 from app.models.kline import StockKlineDaily
+from app.models.financial import StockAnalysisNote, StockFinancialStatement
 from app.models.msci_meta import MsciMeta
 from app.models.portfolio import Position, TradeHistory
 from app.models.stock import Stock
@@ -27,4 +28,6 @@ __all__ = [
     "StockLhbDaily",
     "SystemMeta",
     "StockKlineDaily",
+    "StockFinancialStatement",
+    "StockAnalysisNote",
 ]

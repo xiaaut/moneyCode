@@ -1,7 +1,17 @@
 ﻿<script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, inject, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 const emit = defineEmits(['add-watchlist']);
+const openAnalysisReport = inject('openAnalysisReport', () => {});
+
+function goAnalysis() {
+  const code = String(stockCode.value || '').trim();
+  if (!/^\d{6}$/.test(code)) {
+    ElMessage.warning('请先输入 6 位股票代码');
+    return;
+  }
+  openAnalysisReport(code);
+}
 
 const currentEps = ref(0.0);
 const targetEps = ref(0.0);
@@ -314,6 +324,10 @@ function handleAddWatchlist() {
 
       <el-button type="primary" plain :loading="refreshingSingle" @click="refreshSingle">
         🔄 实时刷新该股行情与财报
+      </el-button>
+
+      <el-button type="warning" plain @click="goAnalysis">
+        📊 财报透视
       </el-button>
 
       <span v-if="selectedStockInfo" class="lk-hint">

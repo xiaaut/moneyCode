@@ -74,3 +74,41 @@ async def get_single_financial_indicators(code: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("同花顺单股指标异常，降级到免费通道 %s：%s", code, exc)
         return await free_client.get_single_financial_indicators(code)
+
+
+# 张氏分析强依赖的资产负债表现金流关键字段（同花顺三表接口不返回这些）
+_CRITICAL_FINANCIAL_FIELDS = {
+    "goodwill", "inventories", "contract_liabilities", "short_term_loans",
+    "long_term_loans", "fixed_assets", "construction_in_progress", "notes_and_accounts_payable",
+    "trading_financial_assets", "other_current_assets", "deduct_parent_net_profit",
+    "other_income", "investment_income", "asset_impairment_loss", "credit_impairment_loss",
+}
+
+
+async def get_financial_statements(code: str, mode: str = "annual", limit: int = 5) -> list[dict[str, Any]]:
+    """三表多期序列。主通道同花顺优先，字段不足时自动用东财 F10 补全。"""
+    if _mode() == "free_only" or not settings.THS_API_KEY:
+        return await free_client.get_financial_statements(code, mode, limit)
+
+    try:
+        items = await ths_client.get_financial_statements(code, mode, limit)
+    except ThsUnavailableError as exc:
+        logger.warning("同花顺三表降级到免费通道 %s：%s", code, exc)
+        return await free_client.get_financial_statements(code, mode, limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("同花顺三表异常，降级到免费通道 %s：%s", code, exc)
+        return await free_client.get_financial_statements(code, mode, limit)
+
+    # 字段覆盖检查：同花顺三表为简化版，缺张氏关键字段时用东财补全
+    if _missing_critical_fields(items):
+        logger.info("同花顺三表字段不足，改用东财 F10 补全 %s", code)
+        return await free_client.get_financial_statements(code, mode, limit)
+    return items
+
+
+def _missing_critical_fields(items: list[dict[str, Any]]) -> bool:
+    if not items:
+        return False
+    latest = items[0]
+    present = sum(1 for field in _CRITICAL_FINANCIAL_FIELDS if latest.get(field) is not None)
+    return present < len(_CRITICAL_FINANCIAL_FIELDS) * 0.5

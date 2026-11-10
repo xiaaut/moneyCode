@@ -64,6 +64,10 @@
           <GridTrading :portfolio="portfolio" />
         </template>
 
+        <template v-else-if="activeMenu === 'reports'">
+          <AnalysisReport :initial-code="analysisCode" />
+        </template>
+
         <template v-else>
           <div class="placeholder">
             <p>{{ menuTitleMap[activeMenu] }}模块待完善</p>
@@ -100,12 +104,22 @@ import WatchList from './components/WatchList.vue';
 import GridTrading from './components/GridTrading.vue';
 import AStockMarket from './components/AStockMarket.vue';
 import FundFlow from './components/FundFlow.vue';
+import AnalysisReport from './components/AnalysisReport.vue';
 
 const WATCHLIST_API = '/api/watchlist';
 const PORTFOLIO_API = '/api/portfolio';
 
 const watchlistData = ref([]);
 const portfolio = ref([]);
+
+// 分析报告跳转：持仓/策略点击股票时切到分析报告页
+const analysisCode = ref('');
+function openAnalysisReport(code) {
+  analysisCode.value = String(code || '').trim();
+  activeMenu.value = 'reports';
+}
+provide('openAnalysisReport', openAnalysisReport);
+provide('analysisCode', analysisCode);
 
 // 全局刷新信号：收盘更新完成后自增，各页面监听后重载数据
 const refreshSignal = ref(0);
