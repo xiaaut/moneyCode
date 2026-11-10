@@ -195,7 +195,7 @@ my-finance-system/
 
 联合主键 `code`(varchar) + `trade_date`(date)，另建 `trade_date` 索引 · `open`/`high`/`low`/`close`/`pre_close`(NUMERIC 10,3) · `volume`/`amount`(NUMERIC 18,2) · `turnover_ratio`(NUMERIC 6,3) · `adjust_factor`(NUMERIC 10,4) · `qfq_close`(前复权收盘) · `updated_at`。
 
-> 由 `migrate_kline.py` 建表。A 股来自同花顺 market-dumps Parquet（`/api/dump/market-dumps/{daily-k,daily-k-10d}/download-url` 拿预签名链接，pyarrow `iter_batches` 分块流式入库），ETF 来自 `/api/fund/market/historical`（前复权日线）。
+> 由 `migrate_kline.py` 建表。A 股全市场来自同花顺 market-dumps Parquet（`/api/dump/market-dumps/{daily-k,daily-k-10d}/download-url` 拿预签名链接，pyarrow `iter_batches` 分块流式入库）；**持仓/自选批量日线**走 `/api/a-share/prices/historical-batch`（`adjust=forward` 前复权，每批 10 只，`ths_client.chunk_symbols` 切片）；ETF 来自 `/api/fund/market/historical`（前复权日线）。批量 upsert 单批 ≤2500 行（每行 10 字段 = 25000 参数，规避 asyncpg 32767 上限）。
 
 ### 3.13 stock_financial_statements（财报三表 + 张氏衍生指标）
 
@@ -259,6 +259,7 @@ my-finance-system/
 | GET | `/api/kline/sync-historical/progress` | 全量同步进度（phase/done/total/耗时） |
 | POST | `/api/kline/sync-incremental` | 近 10 交易日日 K 增量同步 |
 | POST | `/api/kline/sync-etf/{code}` | 单只 ETF 前复权日线补偿（`years=` 默认 5） |
+| POST | `/api/kline/sync-portfolio` | 批量同步持仓+自选 22 只标的 5 年前复权日线（A 股走 `historical-batch` 每批 10 只，ETF 走 `fund-market/historical`） |
 
 ### 4.5 财报透视与排雷（financials.py）
 
@@ -329,7 +330,7 @@ my-finance-system/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/system/daily-sync` | 启动收盘一键更新（四合一流水线，重入 409） |
+| POST | `/api/system/daily-sync` | 启动收盘一键更新（五合一流水线：刷现价→全市场→资金流→龙虎榜→持仓日线增量，重入 409） |
 | GET | `/api/system/daily-sync/progress` | 流水线进度（running/current_step/percent/steps[]/last_completed_at） |
 | GET | `/` | 服务信息 |
 | GET | `/api/v1/health` | 健康检查（真实 `SELECT 1`，DB 不可用时 503） |

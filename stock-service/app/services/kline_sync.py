@@ -24,7 +24,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.models import StockKlineDaily
-from app.adapters.ths_client import to_ths_code
+from app.adapters.ths_client import is_fund_ticker, ths_client, to_ths_code
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ DOWNLOAD_URLS = {
     "incremental": "/api/dump/market-dumps/daily-k-10d/download-url",
 }
 
-# 单批 upsert 行数（规避 asyncpg 参数上限）
-UPSERT_BATCH = 5000
+# 单批 upsert 行数（每行 10 字段，2500 行 = 25000 参数，规避 asyncpg 32767 上限）
+UPSERT_BATCH = 2500
 # iter_batches 读取块大小
 PARQUET_BATCH = 50000
 
@@ -239,15 +239,11 @@ def launch_sync(kind: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# ETF 前复权日线补偿
+# 持仓/自选日线同步（ETF 走 fund-market，A 股走 historical-batch）
 # --------------------------------------------------------------------------- #
-async def sync_etf_klines(code: str, years: int = 5) -> int:
-    """拉取单只 ETF 近 N 年前复权日线并写入 stock_kline_daily，返回行数。"""
+async def sync_etf_klines_range(code: str, start_ms: int, end_ms: int) -> int:
+    """拉取单只 ETF 指定时间窗口的前复权日线并写入，返回行数。"""
     thscode = to_ths_code(code)
-    now = datetime.now(CN_TZ)
-    start_ms = int((now - timedelta(days=365 * years)).timestamp() * 1000)
-    end_ms = int(now.timestamp() * 1000)
-
     url = f"{settings.THS_BASE_URL}/api/fund/market/historical"
     params = {"thscode": thscode, "interval": "1d", "start": start_ms, "end": end_ms}
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=8)) as client:
@@ -290,3 +286,115 @@ async def sync_etf_klines(code: str, years: int = 5) -> int:
             inserted += await _upsert_chunk(session, chunk)
         await session.commit()
     return inserted
+
+
+async def sync_etf_klines(code: str, years: int = 5) -> int:
+    """拉取单只 ETF 近 N 年前复权日线并写入，返回行数（兼容旧签名）。"""
+    now = datetime.now(CN_TZ)
+    start_ms = int((now - timedelta(days=365 * years)).timestamp() * 1000)
+    end_ms = int(now.timestamp() * 1000)
+    return await sync_etf_klines_range(code, start_ms, end_ms)
+
+
+async def sync_stock_klines(codes: list[str], start_ms: int, end_ms: int) -> int:
+    """批量拉取 A 股历史日线（adjust=forward 前复权）并写入，返回入库行数。"""
+    if not codes:
+        return 0
+    grouped = await ths_client.get_historical_batch(codes, start_ms, end_ms)
+
+    rows: list[dict[str, Any]] = []
+    for code in codes:
+        for item in grouped.get(code, []):
+            trade_date = _ms_to_date(item.get("date_ms"))
+            if trade_date is None:
+                continue
+            close = _f(item.get("close_price"))
+            rows.append(
+                {
+                    "code": code,
+                    "trade_date": trade_date,
+                    "open": _f(item.get("open_price")),
+                    "high": _f(item.get("high_price")),
+                    "low": _f(item.get("low_price")),
+                    "close": close,
+                    "volume": _f(item.get("volume")),
+                    "amount": _f(item.get("turnover")),
+                    "adjust_factor": 1.0,
+                    "qfq_close": close,  # adjust=forward 已是前复权
+                }
+            )
+
+    if not rows:
+        return 0
+
+    inserted = 0
+    async with AsyncSessionLocal() as session:
+        for i in range(0, len(rows), UPSERT_BATCH):
+            chunk = rows[i : i + UPSERT_BATCH]
+            inserted += await _upsert_chunk(session, chunk)
+        await session.commit()
+    return inserted
+
+
+async def _portfolio_codes() -> tuple[list[str], list[str]]:
+    """返回 (stocks, funds)：持仓 + 自选去重后按 ETF/A 股分流。"""
+    from sqlalchemy import select
+
+    from app.models import Position, WatchlistItem
+
+    async with AsyncSessionLocal() as session:
+        positions = (await session.scalars(select(Position.code))).all()
+        watchlist = (await session.scalars(select(WatchlistItem.stock_code))).all()
+
+    codes = list(dict.fromkeys([*(positions or []), *(watchlist or [])]))
+    codes = [c for c in codes if c and len(c) == 6]
+    stocks = [c for c in codes if not is_fund_ticker(c)]
+    funds = [c for c in codes if is_fund_ticker(c)]
+    return stocks, funds
+
+
+async def sync_portfolio_klines(years: int = 5) -> dict[str, Any]:
+    """全量同步持仓 + 自选标的近 N 年前复权日线，返回统计。"""
+    stocks, funds = await _portfolio_codes()
+    now = datetime.now(CN_TZ)
+    start_ms = int((now - timedelta(days=365 * years)).timestamp() * 1000)
+    end_ms = int(now.timestamp() * 1000)
+
+    total = 0
+    detail: dict[str, Any] = {
+        "total_codes": len(stocks) + len(funds),
+        "stocks": len(stocks),
+        "funds": len(funds),
+        "stock_rows": 0,
+        "fund_rows": 0,
+    }
+    if stocks:
+        detail["stock_rows"] = await sync_stock_klines(stocks, start_ms, end_ms)
+        total += detail["stock_rows"]
+    for code in funds:
+        try:
+            n = await sync_etf_klines_range(code, start_ms, end_ms)
+            detail["fund_rows"] += n
+            total += n
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ETF %s 日线同步失败：%s", code, exc)
+    detail["inserted"] = total
+    return detail
+
+
+async def sync_portfolio_incremental(lookback_days: int = 15) -> int:
+    """收盘一键更新用：增量抓取持仓 + 自选最近约 10 个交易日日线，返回入库行数。"""
+    stocks, funds = await _portfolio_codes()
+    now = datetime.now(CN_TZ)
+    start_ms = int((now - timedelta(days=lookback_days)).timestamp() * 1000)
+    end_ms = int(now.timestamp() * 1000)
+
+    total = 0
+    if stocks:
+        total += await sync_stock_klines(stocks, start_ms, end_ms)
+    for code in funds:
+        try:
+            total += await sync_etf_klines_range(code, start_ms, end_ms)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ETF %s 增量日线失败：%s", code, exc)
+    return total

@@ -265,6 +265,47 @@ class ThsClient:
         return None
 
     # ------------------------------------------------------------------ #
+    # 批量历史日线（前复权）
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def chunk_symbols(codes: list[str], size: int = BATCH_LIMIT) -> list[list[str]]:
+        """按批量上限切片代码列表（默认每批 10 个）。"""
+        return [codes[i : i + size] for i in range(0, len(codes), size)]
+
+    async def get_historical_batch(
+        self,
+        codes: list[str],
+        start_ms: int,
+        end_ms: int,
+        interval: str = "1d",
+        adjust: str = "forward",
+    ) -> dict[str, list[dict[str, Any]]]:
+        """批量拉取 A 股历史日 K，返回 {6位代码: [K线记录]}。
+
+        单 chunk 失败仅记 warning 并继续，不影响其它批次。
+        """
+        result: dict[str, list[dict[str, Any]]] = {}
+        for chunk in self.chunk_symbols(codes):
+            ths_codes = [to_ths_code(c) for c in chunk]
+            code_, data, message = await self._request(
+                "/api/a-share/prices/historical-batch",
+                {
+                    "thscodes": ",".join(ths_codes),
+                    "interval": interval,
+                    "start": start_ms,
+                    "end": end_ms,
+                    "adjust": adjust,
+                },
+            )
+            if code_ != 0:
+                logger.warning("历史日线批量拉取失败 code=%s %s（chunk=%s）", code_, message, ths_codes)
+                continue
+            for group in (data or {}).get("item") or []:
+                code = from_ths_code(group.get("thscode") or "")
+                result[code] = group.get("item") or []
+        return result
+
+    # ------------------------------------------------------------------ #
     # 单股完整指标（行情 + 估值 + 财务）
     # ------------------------------------------------------------------ #
     async def get_single_financial_indicators(self, code: str) -> dict[str, Any]:

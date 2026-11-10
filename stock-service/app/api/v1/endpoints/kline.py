@@ -37,3 +37,11 @@ async def sync_etf(code: str, years: int = Query(5, ge=1, le=5)) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"ETF 日线拉取失败：{exc}") from exc
     return {"code": code, "inserted": count}
+
+
+@router.post("/kline/sync-portfolio", summary="批量同步持仓与自选股 5 年前复权日线")
+async def sync_portfolio(years: int = Query(5, ge=1, le=5)) -> dict:
+    try:
+        return await kline_sync.sync_portfolio_klines(years)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"持仓日线同步失败：{exc}") from exc

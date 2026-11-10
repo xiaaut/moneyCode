@@ -23,16 +23,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.session import AsyncSessionLocal
 from app.models import Position, Stock, SystemMeta
-from app.services import akshare_sync, fund_flow
+from app.services import akshare_sync, fund_flow, kline_sync
 from app.services.quotes import quote_service
 
 logger = logging.getLogger(__name__)
 
 STEPS = [
     {"key": "positions", "label": "刷新持仓现价", "weight": 15},
-    {"key": "market", "label": "同步全市场行情", "weight": 35},
-    {"key": "fundflow", "label": "同步主力资金流", "weight": 30},
-    {"key": "lhb", "label": "同步龙虎榜", "weight": 20},
+    {"key": "market", "label": "同步全市场行情", "weight": 33},
+    {"key": "fundflow", "label": "同步主力资金流", "weight": 28},
+    {"key": "lhb", "label": "同步龙虎榜", "weight": 19},
+    {"key": "kline", "label": "同步持仓日线增量", "weight": 5},
 ]
 
 
@@ -108,6 +109,12 @@ async def _step_positions() -> str:
         return f"刷新 {updated}/{len(positions)} 只持仓现价"
 
 
+async def _step_kline_incremental() -> str:
+    """增量抓取持仓 + 自选最近约 10 个交易日前复权日线，返回摘要。"""
+    n = await kline_sync.sync_portfolio_incremental()
+    return f"增量更新 {n} 行日线"
+
+
 def _summary_for(index: int) -> str:
     if index == 1:
         return daily_state.get("_step1_summary", "")
@@ -117,6 +124,8 @@ def _summary_for(index: int) -> str:
         return fund_flow.fund_flow_job.message or ""
     if index == 4:
         return fund_flow.lhb_job.message or ""
+    if index == 5:
+        return daily_state.get("_step5_summary", "")
     return ""
 
 
@@ -132,6 +141,8 @@ async def _run_step(index: int, fn: Callable[[], Awaitable[Any]]) -> None:
         result = await fn()
         if index == 1:
             daily_state["_step1_summary"] = result or ""
+        if index == 5:
+            daily_state["_step5_summary"] = str(result or "")
         step["status"] = "done"
         step["summary"] = _summary_for(index)
     except Exception as exc:  # noqa: BLE001 - 单步失败不中断后续步骤
@@ -188,6 +199,7 @@ async def run_daily_sync() -> None:
         await _run_step(2, akshare_sync.run_akshare_sync)
         await _run_step(3, fund_flow.run_fund_flow_sync)
         await _run_step(4, fund_flow.run_lhb_sync)
+        await _run_step(5, _step_kline_incremental)
     except Exception as exc:  # noqa: BLE001 - 兜底
         logger.exception("daily-sync 整体失败")
         daily_state["error"] = str(exc)[:200]

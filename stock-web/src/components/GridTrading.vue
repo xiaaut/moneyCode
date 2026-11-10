@@ -634,6 +634,13 @@ const backtestForm = reactive({
 const backtestLoading = ref(false);
 const backtestResult = ref(null);
 
+/* 回测可选标的：持仓列表（code + name），支持下拉选择任意持仓代码 */
+const portfolioOptions = computed(() =>
+  (props.portfolio || [])
+    .map(item => ({ code: String(item?.code || '').trim(), name: String(item?.name || '') }))
+    .filter(item => /^\d{6}$/.test(item.code)),
+);
+
 function pad2(value) {
   return String(value).padStart(2, '0');
 }
@@ -654,11 +661,8 @@ function setBacktestRange(range) {
 
 function openBacktest() {
   const code = String(form.symbol || '').trim();
-  if (!/^\d{6}$/.test(code)) {
-    ElMessage.warning('请先填写 6 位股票代码');
-    return;
-  }
-  backtestForm.code = code;
+  // 预填当前策略代码（若有），否则留空由用户在抽屉中选择/输入
+  backtestForm.code = /^\d{6}$/.test(code) ? code : '';
   backtestForm.basePrice = num(form.basePrice) || num(effectivePrice.value) || 0;
   backtestForm.stepPct = 1.0;
   backtestForm.gridAmount = 10000;
@@ -671,6 +675,10 @@ function openBacktest() {
 }
 
 async function runBacktest() {
+  if (!/^\d{6}$/.test(String(backtestForm.code || '').trim())) {
+    ElMessage.warning('请选择或输入 6 位股票代码');
+    return;
+  }
   if (!(num(backtestForm.basePrice) > 0)) {
     ElMessage.warning('请填写基准价');
     return;
@@ -1169,7 +1177,21 @@ onMounted(loadStrategies);
       <div class="backtest-body">
         <el-form label-width="88px" size="small" class="backtest-form">
           <el-form-item label="标的代码">
-            <el-input :model-value="backtestForm.code" disabled style="width: 160px" />
+            <el-select
+              v-model="backtestForm.code"
+              filterable
+              allow-create
+              default-first-option
+              placeholder="选择持仓或输入代码"
+              style="width: 220px"
+            >
+              <el-option
+                v-for="p in portfolioOptions"
+                :key="p.code"
+                :value="p.code"
+                :label="`${p.code} ${p.name}`"
+              />
+            </el-select>
           </el-form-item>
           <div class="backtest-grid">
             <el-form-item label="基准价(元)">
