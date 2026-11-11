@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models import Position, TradeHistory, WatchlistItem
 from app.schemas.common import OkResponse, fmt_num, fmt_pct, num_or_dash, parse_number
+from app.services import onboarding
 from app.schemas.portfolio import (
     ClosedPositionCreate,
     PositionIn,
@@ -288,6 +290,8 @@ async def upsert_position(
         select(func.coalesce(func.sum(Position.shares * Position.current_price), 0))
     )
     await _sync_stocks_from_positions(db, [row])
+    # 新股票自动入驻：异步拉日线 + 财报体检，不阻塞响应
+    asyncio.create_task(onboarding.auto_onboard_stock(row["code"]))
     return _position_to_out(saved, float(total or 0))
 
 
@@ -482,6 +486,8 @@ async def add_watchlist_item(
     db.add(item)
     await db.commit()
     await db.refresh(item)
+    # 新自选股自动入驻：异步拉日线 + 财报体检
+    asyncio.create_task(onboarding.auto_onboard_stock(code))
     return _watchlist_to_out(item)
 
 

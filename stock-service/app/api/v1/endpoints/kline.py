@@ -45,3 +45,17 @@ async def sync_portfolio(years: int = Query(5, ge=1, le=5)) -> dict:
         return await kline_sync.sync_portfolio_klines(years)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"持仓日线同步失败：{exc}") from exc
+
+
+@router.get("/kline/drawer/{code}", summary="详情抽屉 K 线透视舱（日K+均线+成本+工单+财报摘要）")
+async def kline_drawer(
+    code: str,
+    period: str = Query("6m", pattern="^(3m|6m|1y|3y|5y)$"),
+) -> dict:
+    normalized = "".join(ch for ch in code if ch.isdigit())[-6:]
+    if len(normalized) != 6:
+        raise HTTPException(status_code=400, detail="无效的股票代码")
+    try:
+        return await kline_sync.get_drawer_kline(normalized, period)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"K 线透视舱拉取失败：{exc}") from exc

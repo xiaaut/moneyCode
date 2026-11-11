@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.adapters.ths_client import is_fund_ticker
 from app.db.session import AsyncSessionLocal
 from app.models import Position, RebalancePlan, Stock, WatchlistItem
 from app.models.financial import ALL_MONEY_FIELDS
@@ -79,7 +80,7 @@ async def _load_financial_health(code: str) -> dict[str, Any]:
         item["derived_metrics"] = row.derived_metrics or {}
         items.append(item)
 
-    financial_analysis.finalize(items)
+    financial_analysis.analyze(items)
     latest = items[0]
     radars = latest.get("radar_checks") or []
     danger = sum(1 for r in radars if r.get("status") == "danger")
@@ -229,11 +230,12 @@ def _build_advice(item: dict[str, Any], signals: list[str]) -> str:
 async def get_dashboard() -> dict[str, Any]:
     async with AsyncSessionLocal() as session:
         positions = (await session.scalars(select(Position))).all()
-        watchlist = (await session.scalars(select(WatchlistItem.stock_code, WatchlistItem.stock_name))).all()
+        watch_rows = (await session.execute(select(WatchlistItem.stock_code, WatchlistItem.stock_name))).all()
 
     pos_codes = [p.code for p in positions]
-    watch_codes = [w[0] for w in watchlist]
-    all_codes = list(dict.fromkeys([*pos_codes, *watch_codes]))
+    watch_codes = [w[0] for w in watch_rows]
+    watch_name_map = {w[0]: w[1] for w in watch_rows}
+    all_codes = [c for c in dict.fromkeys([*pos_codes, *watch_codes]) if c and len(c) == 6]
 
     roe_map = await _load_roe_map(all_codes)
     target_map = await _load_target_price()
@@ -259,7 +261,7 @@ async def get_dashboard() -> dict[str, Any]:
         health = agg["health"]
         kline = agg["kline"]
         p = pos_by_code.get(code)
-        wname = next((w[1] for w in watchlist if w[0] == code), None)
+        wname = watch_name_map.get(code)
 
         name = (p.name if p else None) or wname or code
         shares = int(p.shares or 0) if p else 0
@@ -280,6 +282,7 @@ async def get_dashboard() -> dict[str, Any]:
             "market_value": market_value,
             "profit_ratio": profit_ratio,
             "position_weight_pct": weight,
+            "is_etf": is_fund_ticker(code),
             "health_score": health["health_score"],
             "driver_type": health["driver_type"],
             "checked": health["checked"],
@@ -324,7 +327,7 @@ async def get_dashboard() -> dict[str, Any]:
         "total_market_value": round(total_mv, 2),
         "total_codes": len(all_codes),
         "position_count": len(positions),
-        "watchlist_count": len(watchlist),
+        "watchlist_count": len(watch_rows),
         "quality_ratio_pct": quality_ratio,
         "signal_count": signal_count,
         "triggered_plan_count": triggered_count,

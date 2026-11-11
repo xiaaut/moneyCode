@@ -1,6 +1,9 @@
 <script setup>
-import { computed, ref, watch } from 'vue';
+import { computed, inject, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
+
+const openAnalysisReport = inject('openAnalysisReport', () => {});
+const openRebalance = inject('openRebalance', () => {});
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -66,7 +69,10 @@ async function load() {
 watch(
   () => props.modelValue,
   v => {
-    if (v) load();
+    if (v) {
+      load();
+      loadKline();
+    }
   },
 );
 
@@ -211,11 +217,228 @@ const latestSummary = computed(() => {
   const sum5 = data.slice(-5).reduce((a, r) => a + (Number(r.mainNetInflow) || 0), 0);
   return { latest, sum5 };
 });
+
+/* ---------------- K 线透视舱 ---------------- */
+const klineData = ref([]);
+const klinePeriod = ref('6m');
+const klineLoading = ref(false);
+const klineMeta = ref({ position_info: null, rebalance_plans: [], financial_summary: null });
+const klineHover = ref(null);
+const klineHoverPos = ref({ x: 0, y: 0 });
+
+const PERIODS = [
+  { key: '3m', label: '近3月' },
+  { key: '6m', label: '近6月' },
+  { key: '1y', label: '近1年' },
+  { key: '3y', label: '近3年' },
+  { key: '5y', label: '近5年' },
+];
+
+async function loadKline() {
+  if (!props.code) return;
+  klineLoading.value = true;
+  try {
+    const resp = await fetch(`/api/kline/drawer/${props.code}?period=${klinePeriod.value}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    klineData.value = Array.isArray(data?.kline) ? data.kline : [];
+    klineMeta.value = {
+      position_info: data?.position_info || null,
+      rebalance_plans: data?.rebalance_plans || [],
+      financial_summary: data?.financial_summary || null,
+    };
+  } catch {
+    klineData.value = [];
+  } finally {
+    klineLoading.value = false;
+  }
+}
+
+function changePeriod(p) {
+  klinePeriod.value = p;
+  loadKline();
+}
+
+const K_W = 680, K_H = 400;
+const K_PADL = 12, K_PADR = 88, K_TOPL = 18, K_TOPR = 20;
+
+const klineChart = computed(() => {
+  const data = klineData.value;
+  if (data.length < 2) return null;
+  const innerW = K_W - K_PADL - K_PADR;
+  const priceBottom = K_TOPL + (K_H - K_TOPL - K_TOPR) * 0.72;
+  const volTop = K_TOPL + (K_H - K_TOPL - K_TOPR) * 0.78;
+  const volBottom = K_H - K_TOPR;
+
+  const closes = data.map(d => Number(d.close) || 0);
+  const ma20 = data.map(d => (d.ma20 == null ? null : Number(d.ma20)));
+  const ma60 = data.map(d => (d.ma60 == null ? null : Number(d.ma60)));
+  const ma250 = data.map(d => (d.ma250 == null ? null : Number(d.ma250)));
+
+  const posCost = klineMeta.value.position_info ? Number(klineMeta.value.position_info.cost_price) : null;
+  const targetPrices = (klineMeta.value.rebalance_plans || []).map(p => Number(p.target_price)).filter(Number.isFinite);
+
+  const allVals = [...closes];
+  [ma20, ma60, ma250].forEach(arr => arr.forEach(v => { if (v != null) allVals.push(v); }));
+  if (posCost != null && posCost > 0) allVals.push(posCost);
+  allVals.push(...targetPrices);
+  let minP = Math.min(...allVals);
+  let maxP = Math.max(...allVals);
+  const pad = (maxP - minP) * 0.08 || 1;
+  minP -= pad; maxP += pad;
+
+  const step = innerW / (data.length - 1);
+  const x = i => K_PADL + i * step;
+  const yPrice = v => priceBottom - (v - minP) / (maxP - minP) * (priceBottom - K_TOPL);
+
+  const maxVol = Math.max(...data.map(d => Number(d.volume) || 0), 1);
+  const yVol = v => volBottom - (v / maxVol) * (volBottom - volTop);
+
+  const toPath = pts => pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+  const maPath = arr => arr.map((v, i) => (v == null ? null : { x: x(i), y: yPrice(v) })).filter(Boolean);
+
+  const closePts = closes.map((v, i) => [x(i), yPrice(v)]);
+  const closePath = toPath(closePts);
+  const areaPath = `${closePath} L${x(data.length - 1).toFixed(1)},${priceBottom} L${x(0).toFixed(1)},${priceBottom} Z`;
+
+  const bars = data.map((d, i) => {
+    const v = Number(d.volume) || 0;
+    return {
+      x: x(i), w: Math.max(step * 0.6, 1),
+      y: yVol(v), h: volBottom - yVol(v),
+      up: Number(d.close) >= Number(d.open),
+    };
+  });
+
+  const costY = posCost != null && posCost > 0 ? yPrice(posCost) : null;
+  const costAbove = costY != null && posCost > closes[closes.length - 1];
+  const targets = targetPrices.map(tp => ({ price: tp, y: yPrice(tp), buy: (klineMeta.value.rebalance_plans || []).find(p => Number(p.target_price) === tp)?.action_type?.startsWith('BUY') }));
+
+  return { data, closes, closePts, ma20, ma60, ma250, closePath, areaPath, ma20Path: maPath(ma20), ma60Path: maPath(ma60), ma250Path: maPath(ma250), bars, priceBottom, volTop, volBottom, step, costY, costAbove, posCost, targets, minP, maxP };
+});
+
+function onKlineMove(event) {
+  if (!klineChart.value) return;
+  const svg = event.currentTarget;
+  const rect = svg.getBoundingClientRect();
+  const xRatio = (event.clientX - rect.left) / rect.width;
+  const viewX = xRatio * K_W;
+  const idx = Math.round((viewX - K_PADL) / klineChart.value.step);
+  const clamped = Math.max(0, Math.min(klineChart.value.data.length - 1, idx));
+  klineHover.value = clamped;
+  klineHoverPos.value = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+function onKlineLeave() { klineHover.value = null; }
+
+const klineHoverInfo = computed(() => {
+  if (klineHover.value == null || !klineChart.value) return null;
+  const i = klineHover.value;
+  const d = klineChart.value.data[i];
+  const prev = i > 0 ? klineChart.value.data[i - 1] : d;
+  const chg = prev.close ? (Number(d.close) - Number(prev.close)) / Number(prev.close) * 100 : 0;
+  const cost = klineChart.value.posCost;
+  const distCost = cost != null && cost > 0 ? (Number(d.close) - cost) / cost * 100 : null;
+  return { d, chg, distCost };
+});
+
+const klineLast = computed(() => {
+  const data = klineData.value;
+  if (!data.length) return null;
+  const last = data[data.length - 1];
+  const prev = data.length > 1 ? data[data.length - 2] : last;
+  const chg = prev.close ? (Number(last.close) - Number(prev.close)) / Number(prev.close) * 100 : 0;
+  return { price: Number(last.close), chg };
+});
+
+const hoverX = computed(() => {
+  if (klineHover.value == null || !klineChart.value) return null;
+  return K_PADL + klineHover.value * klineChart.value.step;
+});
+const hoverCloseY = computed(() => {
+  if (klineHover.value == null || !klineChart.value) return null;
+  const pt = klineChart.value.closePts[klineHover.value];
+  return pt ? pt[1] : null;
+});
+const posCostLabel = computed(() => {
+  const c = klineChart.value?.posCost;
+  return c != null ? c.toFixed(2) : '';
+});
 </script>
 
 <template>
-  <el-drawer v-model="visible" :title="`${name || ''}（${code}）详情`" size="72%">
+  <el-drawer v-model="visible" :title="`${name || ''}（${code}）详情`" size="760px">
     <div v-loading="loading" class="ff-drawer">
+      <!-- K 线透视舱：顶部信息栏 -->
+      <div class="kline-header">
+        <div class="kh-left">
+          <span class="kh-name">{{ name || code }}</span>
+          <span class="kh-code">{{ code }}</span>
+          <span v-if="klineLast" class="kh-price" :class="klineLast.chg >= 0 ? 'up' : 'down'">
+            ¥{{ klineLast.price.toFixed(2) }} {{ klineLast.chg >= 0 ? '+' : '' }}{{ klineLast.chg.toFixed(2) }}%
+          </span>
+          <button v-if="klineMeta.financial_summary" class="kh-health" @click="openAnalysisReport(code)">
+            健康分 {{ klineMeta.financial_summary.health_score }} · {{ klineMeta.financial_summary.driver_type }}
+          </button>
+        </div>
+        <el-button size="small" plain @click="openRebalance">⚖️ 去调仓沙盘</el-button>
+      </div>
+
+      <!-- K 线透视舱 -->
+      <div class="ff-chart-card kline-card">
+        <div class="kline-bar">
+          <div class="kline-legend">
+            <span><i class="dot line"></i>收盘价</span>
+            <span><i class="dot ma20"></i>MA20</span>
+            <span><i class="dot ma60"></i>MA60</span>
+            <span><i class="dot ma250"></i>MA250</span>
+            <span v-if="klineMeta.position_info"><i class="dot cost"></i>持仓成本</span>
+          </div>
+          <div class="kline-periods">
+            <button v-for="p in PERIODS" :key="p.key" class="period-chip" :class="{ active: klinePeriod === p.key }" @click="changePeriod(p.key)">{{ p.label }}</button>
+          </div>
+        </div>
+
+        <div v-loading="klineLoading" class="kline-chart-wrap" @mousemove="onKlineMove" @mouseleave="onKlineLeave">
+          <svg v-if="klineChart" :viewBox="`0 0 ${K_W} ${K_H}`" class="kline-svg" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <linearGradient id="kline-area" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.16" />
+                <stop offset="100%" stop-color="#3b82f6" stop-opacity="0" />
+              </linearGradient>
+            </defs>
+            <!-- 收盘价面积 -->
+            <path :d="klineChart.areaPath" fill="url(#kline-area)" />
+            <!-- 均线 -->
+            <path v-if="klineChart.ma20Path.length" :d="toPath(klineChart.ma20Path)" fill="none" stroke="#3b82f6" stroke-width="1.1" />
+            <path v-if="klineChart.ma60Path.length" :d="toPath(klineChart.ma60Path)" fill="none" stroke="#8b5cf6" stroke-width="1.1" />
+            <path v-if="klineChart.ma250Path.length" :d="toPath(klineChart.ma250Path)" fill="none" stroke="#f59e0b" stroke-width="1.1" />
+            <!-- 收盘价线 -->
+            <path :d="klineChart.closePath" fill="none" stroke="#1d4ed8" stroke-width="1.8" />
+            <!-- 成本线 -->
+            <line v-if="klineChart.costY != null" :x1="K_PADL" :y1="klineChart.costY" :x2="K_W - K_PADR" :y2="klineChart.costY" :stroke="klineChart.costAbove ? '#EF4444' : '#10B981'" stroke-width="1.5" stroke-dasharray="6,4" />
+            <g v-if="klineChart.costY != null">
+              <rect :x="K_W - K_PADR + 4" :y="klineChart.costY - 10" :width="K_PADR - 8" :height="20" rx="10" :fill="klineChart.costAbove ? '#EF4444' : '#10B981'" />
+              <text :x="K_W - K_PADR + 4 + (K_PADR - 8) / 2" :y="klineChart.costY + 4" text-anchor="middle" fill="#fff" font-size="10" font-weight="600">成本 ¥{{ posCostLabel }}</text>
+            </g>
+            <!-- 目标线 -->
+            <line v-for="(t, i) in klineChart.targets" :key="'tg' + i" :x1="K_PADL" :y1="t.y" :x2="K_W - K_PADR" :y2="t.y" :stroke="t.buy ? '#2563eb' : '#f97316'" stroke-width="1.1" stroke-dasharray="3,3" />
+            <!-- 成交量柱 -->
+            <rect v-for="(b, i) in klineChart.bars" :key="'v' + i" :x="b.x - b.w / 2" :y="b.y" :width="b.w" :height="b.h" :fill="b.up ? 'rgba(227,77,77,0.55)' : 'rgba(26,162,97,0.55)'" />
+            <!-- 十字准星 -->
+            <line v-if="hoverX != null" :x1="hoverX" :y1="K_TOPL" :x2="hoverX" :y2="K_H - K_TOPR" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3" />
+            <circle v-if="hoverCloseY != null" :cx="hoverX" :cy="hoverCloseY" r="3.5" fill="#1d4ed8" stroke="#fff" stroke-width="1.5" />
+          </svg>
+          <div v-if="klineHoverInfo" class="kline-tooltip" :style="{ left: (klineHoverPos.x + 14) + 'px', top: (klineHoverPos.y - 10) + 'px' }">
+            <div class="kt-date">{{ klineHoverInfo.d.trade_date }}</div>
+            <div class="kt-row">开 {{ (Number(klineHoverInfo.d.open) || 0).toFixed(2) }} 高 {{ (Number(klineHoverInfo.d.high) || 0).toFixed(2) }}</div>
+            <div class="kt-row">低 {{ (Number(klineHoverInfo.d.low) || 0).toFixed(2) }} 收 {{ (Number(klineHoverInfo.d.close) || 0).toFixed(2) }}</div>
+            <div class="kt-row" :class="klineHoverInfo.chg >= 0 ? 'up' : 'down'">涨跌 {{ klineHoverInfo.chg >= 0 ? '+' : '' }}{{ klineHoverInfo.chg.toFixed(2) }}%</div>
+            <div class="kt-row">成交额 {{ formatAmount(klineHoverInfo.d.amount) }}</div>
+            <div v-if="klineHoverInfo.distCost != null" class="kt-row" :class="klineHoverInfo.distCost >= 0 ? 'up' : 'down'">距成本 {{ klineHoverInfo.distCost >= 0 ? '+' : '' }}{{ klineHoverInfo.distCost.toFixed(2) }}%</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 估值指标 -->
       <div v-if="valuationItems.length" class="ff-chart-card">
         <h4>估值指标</h4>
@@ -613,4 +836,48 @@ const latestSummary = computed(() => {
   color: #445a73;
   flex-shrink: 0;
 }
+
+/* ---- K 线透视舱 ---- */
+.kline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.kh-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.kh-name { font-size: 1.15rem; font-weight: 800; color: #0f172a; }
+.kh-code { font-size: 0.8rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
+.kh-price { font-size: 1rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kh-health {
+  border: 1px solid #BFDBFE; background: #EFF6FF; color: #2563eb; border-radius: 999px;
+  padding: 3px 12px; font-size: 0.78rem; font-weight: 700; cursor: pointer; transition: all 0.15s;
+}
+.kh-health:hover { background: #2563eb; color: #fff; }
+
+.kline-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.kline-legend { display: flex; gap: 12px; font-size: 0.78rem; color: #5a7188; flex-wrap: wrap; }
+.kline-legend .dot { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 4px; vertical-align: 2px; }
+.dot.line { background: #1d4ed8; } .dot.ma20 { background: #3b82f6; } .dot.ma60 { background: #8b5cf6; } .dot.ma250 { background: #f59e0b; } .dot.cost { background: #10b981; }
+.kline-periods { display: flex; gap: 6px; }
+.period-chip {
+  border: 1px solid #e2e8f0; background: #fff; color: #475569; border-radius: 6px;
+  padding: 3px 10px; font-size: 0.76rem; cursor: pointer; transition: all 0.15s;
+}
+.period-chip:hover { border-color: #2563eb; color: #2563eb; }
+.period-chip.active { background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 600; }
+
+.kline-chart-wrap { position: relative; }
+.kline-svg { width: 100%; height: auto; display: block; }
+.kline-tooltip {
+  position: absolute; z-index: 10; pointer-events: none;
+  background: rgba(15, 23, 42, 0.94); color: #eef3f9; border-radius: 8px;
+  padding: 8px 12px; font-size: 0.76rem; line-height: 1.5;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25); white-space: nowrap;
+}
+.kline-tooltip .kt-date { font-weight: 700; color: #bfd7f5; margin-bottom: 2px; font-variant-numeric: tabular-nums; }
+.kline-tooltip .kt-row { font-variant-numeric: tabular-nums; }
+.kline-tooltip .up { color: #ff8080; }
+.kline-tooltip .down { color: #4dd68c; }
 </style>

@@ -398,3 +398,151 @@ async def sync_portfolio_incremental(lookback_days: int = 15) -> int:
         except Exception as exc:  # noqa: BLE001
             logger.warning("ETF %s 增量日线失败：%s", code, exc)
     return total
+
+
+# --------------------------------------------------------------------------- #
+# 详情抽屉 K 线透视舱
+# --------------------------------------------------------------------------- #
+PERIOD_DAYS = {"3m": 90, "6m": 180, "1y": 365, "3y": 1095, "5y": 1825}
+
+
+def _rolling_mean(values: list[float | None], window: int, index: int) -> float | None:
+    if index + 1 < window:
+        return None
+    seg = values[index - window + 1 : index + 1]
+    valid = [v for v in seg if v is not None]
+    if not valid:
+        return None
+    return round(sum(valid) / len(valid), 3)
+
+
+async def get_drawer_kline(code: str, period: str = "6m") -> dict[str, Any]:
+    """详情抽屉 K 线透视舱：前复权日 K + MA20/60/250 + 持仓成本 + 调仓工单 + 财报摘要。"""
+    from datetime import date
+
+    from sqlalchemy import select
+
+    from app.models import Position, RebalancePlan, StockFinancialStatement
+    from app.models.financial import ALL_MONEY_FIELDS
+    from app.services import financial_analysis
+
+    days = PERIOD_DAYS.get(period, 180)
+
+    # 1) 读完整日线（升序），空则实时拉取 5 年
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.scalars(
+                select(StockKlineDaily).where(StockKlineDaily.code == code).order_by(StockKlineDaily.trade_date.asc())
+            )
+        ).all()
+
+    if not rows:
+        now = datetime.now(CN_TZ)
+        start_ms = int((now - timedelta(days=365 * 5)).timestamp() * 1000)
+        end_ms = int(now.timestamp() * 1000)
+        if is_fund_ticker(code):
+            await sync_etf_klines_range(code, start_ms, end_ms)
+        else:
+            await sync_stock_klines([code], start_ms, end_ms)
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.scalars(
+                    select(StockKlineDaily).where(StockKlineDaily.code == code).order_by(StockKlineDaily.trade_date.asc())
+                )
+            ).all()
+
+    closes = [(_f(r.qfq_close) if _f(r.qfq_close) is not None else _f(r.close)) for r in rows]
+    ma20 = [_rolling_mean(closes, 20, i) for i in range(len(closes))]
+    ma60 = [_rolling_mean(closes, 60, i) for i in range(len(closes))]
+    ma250 = [_rolling_mean(closes, 250, i) for i in range(len(closes))]
+
+    cutoff = date.today() - timedelta(days=days)
+    kline = []
+    for i, r in enumerate(rows):
+        if r.trade_date >= cutoff:
+            kline.append(
+                {
+                    "trade_date": str(r.trade_date),
+                    "open": _f(r.open),
+                    "high": _f(r.high),
+                    "low": _f(r.low),
+                    "close": _f(r.close),
+                    "volume": _f(r.volume),
+                    "amount": _f(r.amount),
+                    "ma20": ma20[i],
+                    "ma60": ma60[i],
+                    "ma250": ma250[i],
+                }
+            )
+
+    # 2) 持仓信息
+    position_info = None
+    async with AsyncSessionLocal() as session:
+        pos = await session.scalar(select(Position).where(Position.code == code))
+        if pos:
+            position_info = {
+                "cost_price": _f(pos.cost_price),
+                "shares": int(pos.shares or 0),
+                "profit_pct": _f(pos.profit_ratio),
+                "current_price": _f(pos.current_price),
+            }
+
+    # 3) 调仓工单（PENDING / TRIGGERED）
+    async with AsyncSessionLocal() as session:
+        plan_rows = (
+            await session.scalars(
+                select(RebalancePlan).where(
+                    RebalancePlan.code == code, RebalancePlan.status.in_(["PENDING", "TRIGGERED"])
+                )
+            )
+        ).all()
+    rebalance_plans = [
+        {"target_price": _f(p.target_price), "action_type": p.action_type, "reason_tag": p.reason_tag, "status": p.status}
+        for p in plan_rows
+    ]
+
+    # 4) 财报摘要（finalize 重算健康分）
+    financial_summary: dict[str, Any] = {"health_score": None, "driver_type": None, "bargaining_label": None, "checked": False}
+    async with AsyncSessionLocal() as session:
+        fin_rows = (
+            await session.scalars(
+                select(StockFinancialStatement)
+                .where(StockFinancialStatement.code == code)
+                .order_by(StockFinancialStatement.report_date.desc())
+                .limit(5)
+            )
+        ).all()
+    if fin_rows:
+        items = []
+        for r in fin_rows:
+            item = {
+                "code": r.code,
+                "report_date": str(r.report_date),
+                "report_label": r.report_label,
+                "report_type": r.report_type,
+                "source": r.source,
+            }
+            for field in ALL_MONEY_FIELDS:
+                value = getattr(r, field, None)
+                item[field] = float(value) if value is not None else None
+            item["derived_metrics"] = r.derived_metrics or {}
+            items.append(item)
+        financial_analysis.analyze(items)
+        latest = items[0]
+        dm = latest.get("derived_metrics") or {}
+        net_bp = dm.get("net_bargaining_power")
+        financial_summary = {
+            "health_score": latest.get("health_score"),
+            "driver_type": dm.get("driver_type"),
+            "bargaining_label": "产业链两头吃" if (net_bp is not None and net_bp > 0) else "产业链话语权偏弱",
+            "checked": True,
+        }
+
+    return {
+        "code": code,
+        "period": period,
+        "kline": kline,
+        "position_info": position_info,
+        "rebalance_plans": rebalance_plans,
+        "financial_summary": financial_summary,
+    }

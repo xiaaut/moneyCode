@@ -126,6 +126,12 @@ function openAnalysisReport(code) {
 provide('openAnalysisReport', openAnalysisReport);
 provide('analysisCode', analysisCode);
 
+// 调仓沙盘跳转：详情抽屉「去调仓沙盘」按钮切到待调仓页
+function openRebalance() {
+  activeMenu.value = 'rebalance';
+}
+provide('openRebalance', openRebalance);
+
 // 全局刷新信号：收盘更新完成后自增，各页面监听后重载数据
 const refreshSignal = ref(0);
 provide('appRefreshSignal', refreshSignal);

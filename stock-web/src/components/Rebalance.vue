@@ -1,10 +1,21 @@
 <script setup>
 import { computed, inject, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
+import FundFlowDrawer from './FundFlowDrawer.vue';
 
 const API = '/api/rebalance/dashboard';
 const PLANS_API = '/api/rebalance/plans';
 const openAnalysisReport = inject('openAnalysisReport', () => {});
+
+// 详情抽屉
+const drawerVisible = ref(false);
+const drawerCode = ref('');
+const drawerName = ref('');
+function openDrawer(item) {
+  drawerCode.value = item.code;
+  drawerName.value = item.name;
+  drawerVisible.value = true;
+}
 
 const loading = ref(false);
 const dashboard = ref(null);
@@ -299,14 +310,14 @@ onMounted(loadDashboard);
       <div v-for="item in filteredSignals" :key="item.code" class="signal-card" :style="{ borderTopColor: SIGNAL_COLOR[item.signal_type] || '#e2e8f0' }">
         <div class="card-head">
           <div class="head-left">
-            <span class="stock-name">{{ item.name }}</span>
+            <span class="stock-name" @click="openDrawer(item)">{{ item.name }}</span>
             <span class="stock-code">{{ item.code }}</span>
             <span v-if="item.signal_type" class="signal-badge" :style="{ background: SIGNAL_COLOR[item.signal_type] + '1a', color: SIGNAL_COLOR[item.signal_type] }">{{ SIGNAL_BADGE[item.signal_type] }}</span>
             <span v-if="!item.is_position" class="watch-badge">自选</span>
           </div>
           <div class="head-right">
-            <button class="health-chip" :class="{ 'not-checked': !item.checked }" @click="openAnalysisReport(item.code)">
-              {{ item.checked ? (item.health_score != null ? `健康分 ${item.health_score}` : '体检中') : '待体检' }}
+            <button class="health-chip" :class="{ 'not-checked': !item.checked && !item.is_etf }" @click="openAnalysisReport(item.code)">
+              {{ item.is_etf ? '指数基金·免体检' : (item.checked ? (item.health_score != null ? `健康分 ${item.health_score}` : '体检中') : '待体检') }}
             </button>
           </div>
         </div>
@@ -476,6 +487,9 @@ onMounted(loadDashboard);
         <el-button type="primary" @click="savePlan">保存工单</el-button>
       </template>
     </el-dialog>
+
+    <!-- 详情抽屉（K 线 + 成本 + 资金流 + 龙虎榜） -->
+    <FundFlowDrawer v-model="drawerVisible" :code="drawerCode" :name="drawerName" />
   </div>
 </template>
 

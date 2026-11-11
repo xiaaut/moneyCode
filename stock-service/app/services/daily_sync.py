@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.session import AsyncSessionLocal
 from app.models import Position, Stock, SystemMeta
-from app.services import akshare_sync, fund_flow, kline_sync
+from app.services import akshare_sync, fund_flow, kline_sync, onboarding
 from app.services.quotes import quote_service
 
 logger = logging.getLogger(__name__)
@@ -110,9 +110,32 @@ async def _step_positions() -> str:
 
 
 async def _step_kline_incremental() -> str:
-    """增量抓取持仓 + 自选最近约 10 个交易日前复权日线，返回摘要。"""
+    """增量抓取持仓 + 自选最近约 10 个交易日前复权日线，末尾自愈补齐未体检 A 股财报。"""
     n = await kline_sync.sync_portfolio_incremental()
-    return f"增量更新 {n} 行日线"
+    healed = await _self_heal_financial()
+    msg = f"增量更新 {n} 行日线"
+    if healed:
+        msg += f"，自愈体检 {healed} 只"
+    return msg
+
+
+async def _self_heal_financial() -> int:
+    """自愈：扫描持仓/自选中未体检的 A 股，自动补齐财报三表。返回本次补齐数。"""
+    from app.adapters.ths_client import is_fund_ticker
+    from app.models import WatchlistItem
+
+    async with AsyncSessionLocal() as session:
+        positions = (await session.scalars(select(Position.code))).all()
+        watchlist = (await session.scalars(select(WatchlistItem.stock_code))).all()
+    codes = list(dict.fromkeys([*(positions or []), *(watchlist or [])]))
+
+    healed = 0
+    for code in codes:
+        if not code or len(code) != 6 or is_fund_ticker(code):
+            continue
+        if await onboarding.ensure_financial(code):
+            healed += 1
+    return healed
 
 
 def _summary_for(index: int) -> str:

@@ -80,6 +80,7 @@ my-finance-system/
 │       │   ├── grid_backtest.py      # 网格历史回测（防未来函数撮合 + 绩效指标）
 │       │   ├── financial_analysis.py # 张新民财报分析（核心指标 + 六大雷区 + 健康分）
 │       │   ├── rebalance_service.py  # 四维联动调仓雷达（持仓/自选/K线/财报聚合 + 信号 + 工单 CRUD）
+│       │   ├── onboarding.py         # 新增股票自动入驻（日线 + 财报三表体检，挂新增持仓/自选钩子）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
@@ -270,6 +271,7 @@ my-finance-system/
 | POST | `/api/kline/sync-incremental` | 近 10 交易日日 K 增量同步 |
 | POST | `/api/kline/sync-etf/{code}` | 单只 ETF 前复权日线补偿（`years=` 默认 5） |
 | POST | `/api/kline/sync-portfolio` | 批量同步持仓+自选 22 只标的 5 年前复权日线（A 股走 `historical-batch` 每批 10 只，ETF 走 `fund-market/historical`） |
+| GET | `/api/kline/drawer/{code}` | 详情抽屉 K 线透视舱：`period=` 3m/6m/1y/3y/5y，返回日K+MA20/60/250（完整序列算 MA 再截取）+ position_info + rebalance_plans + financial_summary |
 
 ### 4.5 财报透视与排雷（financials.py）
 
@@ -277,6 +279,7 @@ my-finance-system/
 |---|---|---|
 | GET | `/api/financials/report/{code}` | 财报透视报告（`refresh=` 强制重拉三表），返回张氏衍生指标 + 六大雷区 + 健康分 + 一句话透视 + 笔记 |
 | POST | `/api/financials/notes/{code}` | 保存个人复盘笔记与评级 |
+| POST | `/api/financials/batch-prewarm` | 批量补齐持仓/自选 A 股三表体检（过滤 ETF，每只间隔 0.25s 礼貌限流，`force=` 全量重算） |
 
 > 读库缓存分支（`refresh=false`）用库内原始三表字段 `financial_analysis.analyze()` 全量重算（含驱动类型），确保 `compute_derived`/`_driver_type` 逻辑升级后旧库数据即时反映新定性；顶层另返回 `driver_type`、`bargaining_label`（净占款>0 → 产业链两头吃）。
 >

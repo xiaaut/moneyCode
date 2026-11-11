@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,10 +12,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import data_router
-from app.db.session import get_db
-from app.models import Stock, StockAnalysisNote, StockFinancialStatement
+from app.adapters.ths_client import is_fund_ticker
+from app.db.session import AsyncSessionLocal, get_db
+from app.models import Position, Stock, StockAnalysisNote, StockFinancialStatement, WatchlistItem
 from app.models.financial import ALL_MONEY_FIELDS
-from app.services import financial_analysis
+from app.services import financial_analysis, onboarding
 
 router = APIRouter(tags=["financials"])
 
@@ -148,3 +150,40 @@ async def save_note(code: str, payload: NoteIn, db: AsyncSession = Depends(get_d
     await db.execute(statement)
     await db.commit()
     return {"ok": True, "code": normalized}
+
+
+@router.post("/financials/batch-prewarm", summary="批量补齐持仓/自选 A 股的张新民三表体检")
+async def batch_prewarm(force: bool = Query(False, description="true 全量重算")) -> dict:
+    """扫描持仓+自选全部标的，过滤 ETF（免三表体检），对缺财报的 A 股依次拉三表落库。"""
+    async with AsyncSessionLocal() as session:
+        positions = (await session.scalars(select(Position.code))).all()
+        watchlist = (await session.scalars(select(WatchlistItem.stock_code))).all()
+
+    codes = list(dict.fromkeys([*(positions or []), *(watchlist or [])]))
+    codes = [c for c in codes if c and len(c) == 6]
+
+    etfs = [c for c in codes if is_fund_ticker(c)]
+    stocks = [c for c in codes if not is_fund_ticker(c)]
+
+    results: list[dict] = []
+    for code in stocks:
+        has = await onboarding._has_financial(code)
+        if has and not force:
+            results.append({"code": code, "status": "skipped", "reason": "已有财报"})
+            continue
+        try:
+            ok = await onboarding._prewarm_financial_one(code)
+            results.append({"code": code, "status": "done" if ok else "empty", "reason": "" if ok else "无三表数据"})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"code": code, "status": "error", "reason": str(exc)[:120]})
+        await asyncio.sleep(0.25)
+
+    done = sum(1 for r in results if r["status"] == "done")
+    return {
+        "total_codes": len(codes),
+        "a_share_count": len(stocks),
+        "etf_count": len(etfs),
+        "etfs": etfs,
+        "done": done,
+        "results": results,
+    }
