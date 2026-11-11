@@ -9,6 +9,7 @@ from app.models.kline import StockKlineDaily
 from app.models.financial import StockAnalysisNote, StockFinancialStatement
 from app.models.msci_meta import MsciMeta
 from app.models.portfolio import Position, TradeHistory
+from app.models.rebalance import RebalancePlan
 from app.models.stock import Stock
 from app.models.strategy import StrategyConfig
 from app.models.fund_flow import StockFundFlowDaily, StockLhbDaily
@@ -30,4 +31,5 @@ __all__ = [
     "StockKlineDaily",
     "StockFinancialStatement",
     "StockAnalysisNote",
+    "RebalancePlan",
 ]

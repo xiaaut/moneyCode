@@ -42,6 +42,7 @@ my-finance-system/
 │   ├── migrate_system_meta.py        # system_meta 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   ├── migrate_kline.py              # stock_kline_daily 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   ├── migrate_financials.py         # 财报三表/笔记表建表（stock_financial_statements + stock_analysis_notes）
+│   ├── migrate_rebalance.py          # rebalance_plans 表建表（调仓工单，CREATE TABLE IF NOT EXISTS，幂等）
 │   └── app/
 │       ├── main.py                   # 入口：lifespan + CORS + 路由挂载 + 统一异常
 │       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池、同花顺数据源）
@@ -62,7 +63,8 @@ my-finance-system/
 │       │   ├── fund_flow.py          #   stock_fund_flow_daily / stock_lhb_daily
 │       │   ├── system_meta.py        #   system_meta（系统元信息，单例）
 │       │   ├── kline.py              #   stock_kline_daily（全市场复权日线）
-│       │   └── financial.py          #   stock_financial_statements / stock_analysis_notes
+│       │   ├── financial.py          #   stock_financial_statements / stock_analysis_notes
+│       │   └── rebalance.py          #   rebalance_plans（调仓工单）
 │       ├── schemas/                  # Pydantic 模型（camelCase 对齐前端）
 │       │   ├── common.py             #   CamelModel 基类 + 脏值转换工具
 │       │   ├── portfolio.py / grid.py / stocks.py / quote.py / strategy.py
@@ -72,11 +74,12 @@ my-finance-system/
 │       │   ├── msci_parse.py         # Excel(TXT/CSV) 解析（openpyxl + xlrd）
 │       │   ├── akshare_sync.py       # AKShare 全市场同步引擎（asyncio.to_thread + 分批 upsert）
 │       │   ├── fund_flow.py          # 资金流/龙虎榜采集（to_thread + 防封限流 + 席位明细）
-│       │   ├── daily_sync.py         # 收盘一键更新（四合一异步流水线编排）
+│       │   ├── daily_sync.py         # 收盘一键更新（五合一异步流水线编排）
 │       │   ├── writeback.py          # 统一回写 stocks（防零值 + name 兜底 + coalesce）
 │       │   ├── kline_sync.py         # K线 Parquet 流式入库 + ETF 前复权日线补偿
 │       │   ├── grid_backtest.py      # 网格历史回测（防未来函数撮合 + 绩效指标）
 │       │   ├── financial_analysis.py # 张新民财报分析（核心指标 + 六大雷区 + 健康分）
+│       │   ├── rebalance_service.py  # 四维联动调仓雷达（持仓/自选/K线/财报聚合 + 信号 + 工单 CRUD）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
@@ -92,6 +95,7 @@ my-finance-system/
 │               ├── fund_flow.py      # 资金流 / 龙虎榜
 │               ├── kline.py          # K线同步（全市场 Parquet / ETF 日线）
 │               ├── financials.py     # 财报透视与排雷报告 / 复盘笔记
+│               ├── rebalance.py      # 四维调仓雷达总览 / 调仓工单 CRUD
 │               └── system.py         # 收盘一键更新
 │
 └── stock-web/                        # Vue3 前端
@@ -206,6 +210,12 @@ my-finance-system/
 ### 3.14 stock_analysis_notes（个人财报复盘笔记）
 
 `code`(varchar) 主键 · `notes`(text) · `tags`(varchar) · `rating`(varchar) · `updated_at`。
+
+### 3.15 rebalance_plans（调仓工单）
+
+`id`(serial 主键) · `code`/`name`/`account_tag`(多账户标记) · `action_type`(BUY_ADD/SELL_PROFIT/SELL_RISK/GRID_T) · `trigger_condition`(<=/>=) · `target_price`/`plan_shares`/`current_cost` · `reason_tag`/`notes` · `status`(PENDING/TRIGGERED/DONE) · `created_at`/`updated_at`。
+
+> 由 `migrate_rebalance.py` 建表。`GET /api/rebalance/dashboard` 时自动对 PENDING 工单做到价判定（BUY_ADD/GRID_T 现价<=触发价 或 SELL_* 现价>=触发价 → TRIGGERED）。
 
 ---
 
@@ -335,6 +345,16 @@ my-finance-system/
 | GET | `/` | 服务信息 |
 | GET | `/api/v1/health` | 健康检查（真实 `SELECT 1`，DB 不可用时 503） |
 
+### 4.11 四维调仓雷达（rebalance.py）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/rebalance/dashboard` | 四维聚合总览：持仓/自选 + 5 年分位/MA20/MA250 + 张氏健康分/雷达 + 4 类调仓信号 + 工单（自动到价判定） |
+| POST | `/api/rebalance/plans` | 新增调仓工单 |
+| PUT | `/api/rebalance/plans/{plan_id}` | 更新调仓工单（含 status） |
+| DELETE | `/api/rebalance/plans/{plan_id}` | 删除调仓工单 |
+| POST | `/api/rebalance/plans/{plan_id}/done` | 标记工单已执行 |
+
 ---
 
 ## 5. 后台异步任务机制
@@ -427,6 +447,7 @@ python migrate_fund_flow.py # 资金流/龙虎榜建表（stock_fund_flow_daily 
 python migrate_system_meta.py # system_meta 表建表（系统元信息，持久化收盘更新完成时间）
 python migrate_kline.py     # stock_kline_daily 表建表（全市场复权日线）
 python migrate_financials.py # 财报三表/笔记表建表（stock_financial_statements + stock_analysis_notes）
+python migrate_rebalance.py # rebalance_plans 表建表（调仓工单）
 
 # 2) 启动后端（端口 8000）
 uvicorn app.main:app --reload --port 8000

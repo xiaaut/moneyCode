@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     msci,
     portfolio,
     quote,
+    rebalance,
     state_owned,
     stocks,
     strategy,
@@ -30,5 +31,6 @@ api_router.include_router(fund_flow.router)
 api_router.include_router(system.router)
 api_router.include_router(kline.router)
 api_router.include_router(financials.router)
+api_router.include_router(rebalance.router)
 
 __all__ = ["api_router"]

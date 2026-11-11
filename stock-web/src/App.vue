@@ -64,6 +64,10 @@
           <GridTrading :portfolio="portfolio" />
         </template>
 
+        <template v-else-if="activeMenu === 'rebalance'">
+          <Rebalance />
+        </template>
+
         <template v-else-if="activeMenu === 'reports'">
           <AnalysisReport :initial-code="analysisCode" />
         </template>
@@ -105,6 +109,7 @@ import GridTrading from './components/GridTrading.vue';
 import AStockMarket from './components/AStockMarket.vue';
 import FundFlow from './components/FundFlow.vue';
 import AnalysisReport from './components/AnalysisReport.vue';
+import Rebalance from './components/Rebalance.vue';
 
 const WATCHLIST_API = '/api/watchlist';
 const PORTFOLIO_API = '/api/portfolio';
