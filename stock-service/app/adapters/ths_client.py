@@ -95,6 +95,16 @@ def _num(value: Any) -> float | None:
     return result
 
 
+def _ms_to_date(ms: Any):
+    """毫秒 Unix 时间戳（Asia/Shanghai 零点）-> date。"""
+    from datetime import date as _date, timedelta, timezone as _tz
+
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=_tz(timedelta(hours=8))).date()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
 class ThsUnavailableError(Exception):
     """同花顺通道不可用（认证/权限/限流/上游异常），应降级到免费通道。"""
 
@@ -263,6 +273,43 @@ class ThsClient:
             if from_ths_code(item.get("thscode") or "") == code:
                 return item.get("name")
         return None
+
+    # ------------------------------------------------------------------ #
+    # 除复权事件流（分红 / 送股 / 配股）
+    # ------------------------------------------------------------------ #
+    async def get_adjustment_factors(
+        self, code: str, from_date: str | None = None, to_date: str | None = None
+    ) -> list[dict[str, Any]]:
+        """单只 A 股复权因子事件流，返回 [{ex_date, cash_div_per_share, bonus_share_ratio}]。
+
+        接口每次仅接受单个 thscode，事件按 ex_date 降序（最新在前）。
+        字段：ex_date_ms（除权除息日，Asia/Shanghai 零点毫秒）、
+        dividend_per_share（每股现金分红，税前）、per_share_bonus（每股送股比例）。
+        """
+        if is_fund_ticker(code):
+            return []
+        ths_code = to_ths_code(code)
+        params: dict[str, Any] = {"thscode": ths_code}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        data = await self._request_or_fail(
+            "/api/a-share/corporate-actions/adjustment-factors", params
+        )
+        events: list[dict[str, Any]] = []
+        for item in (data or {}).get("item") or []:
+            ex_ms = item.get("ex_date_ms")
+            if not ex_ms:
+                continue
+            events.append(
+                {
+                    "ex_date": _ms_to_date(ex_ms),
+                    "cash_div_per_share": _num(item.get("dividend_per_share")) or 0.0,
+                    "bonus_share_ratio": _num(item.get("per_share_bonus")) or 0.0,
+                }
+            )
+        return events
 
     # ------------------------------------------------------------------ #
     # 批量历史日线（前复权）

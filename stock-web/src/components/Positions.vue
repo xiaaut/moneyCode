@@ -160,6 +160,10 @@ const editForm = ref({
   eps: '-',
   eps3y: '-',
 });
+// 分红除权成本试算
+const dividendLoading = ref(false);
+const dividendPreview = ref(null);
+const dividendError = ref('');
 
 const redColumnsWhenProfitPositive = new Set(['code', 'name', 'sector', 'costPrice', 'quantity', 'currentPrice', 'totalCost', 'marketValue', 'profitAmount', 'profitRatio', 'positionRatio']);
 
@@ -191,6 +195,44 @@ const formatThreeDecimalCell = (_, __, value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num.toFixed(3) : value;
 };
+
+// ---- 最近修改时间 ----
+function formatUpdatedAt(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// 列宽很窄，日期/时间分两行显示
+function formatUpdatedDate(iso) {
+  const text = formatUpdatedAt(iso);
+  return text === '—' ? '—' : text.slice(0, 10);
+}
+
+function formatUpdatedClock(iso) {
+  const text = formatUpdatedAt(iso);
+  return text === '—' ? '' : text.slice(11);
+}
+
+function isToday(iso) {
+  if (!iso) return false;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return false;
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
+
+function sortByUpdatedAt(a, b) {
+  const ta = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+  const tb = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+  return ta - tb;
+}
 const STRATEGY_EPS_YEARS = 3;
 const STRATEGY_HOLD_YEARS = 3;
 const piePalette = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#14b8a6', '#f97316', '#64748b', '#ec4899', '#06b6d4'];
@@ -749,29 +791,37 @@ async function confirmAdd() {
     const latestRoe = roeMap.get(parsed.pureCode);
     if (latestRoe) roe = latestRoe;
 
-    const maxId = tableData.value.reduce((max, row) => Math.max(max, row.id), 0);
-    tableData.value.push({
-      id: maxId + 1,
+    // 走单条接口新增，后端会刷新 updated_at（作为「最近整理时间」），
+    // 并异步触发 auto_onboard_stock 拉日线 + 财报体检。
+    const payload = {
       code: parsed.pureCode,
       name,
       sector,
       costPrice: Number(addForm.value.costPrice),
       quantity: Number(addForm.value.quantity),
       currentPrice,
-      totalCost: 0,
-      marketValue: 0,
-      profitAmount: 0,
-      profitRatio: '0.00%',
-      positionRatio: '0.00%',
       pb,
       pe,
       roe,
       avgPe: '-',
       eps: '-',
       eps3y: '-',
+    };
+    const resp = await fetch(`${PORTFOLIO_API}/positions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    const saved = await resp.json();
+    const existIdx = tableData.value.findIndex(item => item.code === saved.code);
+    if (existIdx >= 0) tableData.value[existIdx] = saved;
+    else tableData.value.push(saved);
 
-    refreshDerivedFields();
+    refreshDerivedFields(false);
     addDialogVisible.value = false;
     ElMessage.success('新增成功，已自动获取行情与财报数据');
   } catch (error) {
@@ -793,20 +843,84 @@ function openEditDialog(row) {
     eps: String(row.eps ?? '-'),
     eps3y: String(row.eps3y ?? '-'),
   };
+  // 清空上次分红试算结果
+  dividendPreview.value = null;
+  dividendError.value = '';
   editDialogVisible.value = true;
 }
 
-function confirmEdit() {
+async function doDividendPreview() {
+  const code = String(editForm.value.code || '').trim();
+  const cost = Number(editForm.value.costPrice) || 0;
+  const shares = Number(editForm.value.quantity) || 0;
+  if (!/^\d{6}$/.test(code)) {
+    ElMessage.warning('股票代码无效，无法试算');
+    return;
+  }
+  dividendLoading.value = true;
+  dividendError.value = '';
+  dividendPreview.value = null;
+  try {
+    const qs = new URLSearchParams({ current_cost: String(cost), current_shares: String(shares) });
+    const resp = await fetch(`${PORTFOLIO_API}/positions/${code}/dividend-preview?${qs.toString()}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    if (!data.found) {
+      dividendError.value = data.message || '未查到分红记录';
+    } else {
+      dividendPreview.value = data;
+    }
+  } catch (error) {
+    dividendError.value = error.message || '试算失败';
+  } finally {
+    dividendLoading.value = false;
+  }
+}
+
+function applyDividendCost() {
+  if (!dividendPreview.value || !(Number(dividendPreview.value.new_cost) > 0)) return;
+  editForm.value.costPrice = Number(dividendPreview.value.new_cost);
+  ElMessage.success(`已填入除息后成本 ¥${dividendPreview.value.new_cost.toFixed(3)}`);
+}
+
+async function confirmEdit() {
   const idx = tableData.value.findIndex(item => item.id === editingRowId.value);
   if (idx < 0) return;
-  tableData.value[idx].costPrice = Number(editForm.value.costPrice) || 0;
-  tableData.value[idx].quantity = Number(editForm.value.quantity) || 0;
-  tableData.value[idx].avgPe = String(editForm.value.avgPe || '').trim() || '-';
-  tableData.value[idx].eps = String(editForm.value.eps || '').trim() || '-';
-  tableData.value[idx].eps3y = String(editForm.value.eps3y || '').trim() || '-';
-  refreshDerivedFields();
-  editDialogVisible.value = false;
-  ElMessage.success('修改成功');
+  const row = tableData.value[idx];
+
+  // 走单条 PUT 接口修改，后端会刷新 updated_at（作为「最近整理时间」）。
+  const payload = {
+    code: row.code,
+    name: row.name,
+    sector: row.sector,
+    costPrice: Number(editForm.value.costPrice) || 0,
+    quantity: Number(editForm.value.quantity) || 0,
+    currentPrice: Number(row.currentPrice) || 0,
+    pb: row.pb,
+    pe: row.pe,
+    roe: row.roe,
+    avgPe: String(editForm.value.avgPe || '').trim() || '-',
+    eps: String(editForm.value.eps || '').trim() || '-',
+    eps3y: String(editForm.value.eps3y || '').trim() || '-',
+  };
+  try {
+    const resp = await fetch(`${PORTFOLIO_API}/positions/${row.code}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    const saved = await resp.json();
+    tableData.value[idx] = saved;
+    refreshDerivedFields(false);
+    editDialogVisible.value = false;
+    ElMessage.success('修改成功');
+  } catch (error) {
+    ElMessage.error(`修改失败：${error.message || '请稍后重试'}`);
+  }
 }
 
 async function deleteRow(row) {
@@ -894,38 +1008,51 @@ watch(appRefreshSignal, () => {
       <el-button type="danger" plain :loading="syncingFundFlow" @click="syncFundFlow">同步主力资金</el-button>
     </div>
 
-    <el-table :data="tableData" border style="width: 100%" max-height="620" :cell-class-name="tableCellClassName" :row-class-name="tableRowClassName" show-summary :summary-method="getSummaries" size="small" @row-click="openDrawer">
-      <el-table-column type="index" label="序号" width="60" align="center" fixed />
-      <el-table-column prop="code" label="股票代码" width="100" align="center" fixed />
-      <el-table-column prop="name" label="股票名称" width="150" align="center" fixed>
+    <el-table class="portfolio-table" :data="tableData" border style="width: 100%" max-height="620" :cell-class-name="tableCellClassName" :row-class-name="tableRowClassName" show-summary :summary-method="getSummaries" size="small" @row-click="openDrawer">
+      <el-table-column type="index" label="序号" min-width="38" align="center" />
+      <el-table-column prop="code" label="代码" min-width="62" align="center" />
+      <el-table-column prop="name" label="名称" min-width="84" align="center">
         <template #default="scope">
           <span class="name-cell" @click="openAnalysisReport(scope.row.code)" title="点击查看财报透视">
-            {{ scope.row.name }}
-            <span class="name-report-icon">📊</span>
+            {{ scope.row.name }}<span class="name-report-icon">📊</span>
           </span>
-          <el-tag v-if="fundSummary[scope.row.code]?.lhb" size="small" type="danger" style="margin-left:4px">🔥龙虎榜</el-tag>
+          <span v-if="fundSummary[scope.row.code]?.lhb" class="lhb-badge" title="近期登龙虎榜">🔥</span>
         </template>
       </el-table-column>
-      <el-table-column prop="sector" label="所属板块" width="120" align="center" />
-      <el-table-column prop="costPrice" label="成本价" width="100" align="right" />
-      <el-table-column prop="quantity" label="持仓数量" width="100" align="right" />
-      <el-table-column prop="currentPrice" label="现价" width="100" align="right" :formatter="formatThreeDecimalCell" />
-      <el-table-column prop="totalCost" label="成本总金额" width="130" align="right" :formatter="formatThreeDecimalCell" />
-      <el-table-column prop="marketValue" label="持仓市值" width="130" align="right" :formatter="formatThreeDecimalCell" />
-      <el-table-column prop="profitAmount" label="盈亏金额" width="110" align="right" :formatter="formatThreeDecimalCell" />
-      <el-table-column prop="profitRatio" label="盈亏比例 (%)" width="120" align="right" />
-      <el-table-column prop="positionRatio" label="仓位占比 (%)" width="120" align="right" />
+      <el-table-column prop="sector" label="板块" min-width="74" align="center" show-overflow-tooltip />
+      <el-table-column prop="costPrice" label="成本价" min-width="60" align="right" />
+      <el-table-column prop="quantity" label="持仓量" min-width="58" align="right" />
+      <el-table-column prop="currentPrice" label="现价" min-width="56" align="right" :formatter="formatThreeDecimalCell" />
+      <el-table-column prop="totalCost" label="成本金额" min-width="84" align="right" :formatter="formatThreeDecimalCell" />
+      <el-table-column prop="marketValue" label="市值" min-width="80" align="right" :formatter="formatThreeDecimalCell" />
+      <el-table-column prop="profitAmount" label="盈亏额" min-width="78" align="right" :formatter="formatThreeDecimalCell" />
+      <el-table-column prop="profitRatio" label="盈亏%" min-width="60" align="right" />
+      <el-table-column prop="positionRatio" label="仓位%" min-width="58" align="right" />
 
-      <el-table-column label="近5日主力动向" width="130" align="center">
+      <el-table-column label="5日主力" min-width="74" align="center">
         <template #default="scope">
-          <FundFlowSpark :values="fundSummary[scope.row.code]?.mainNetInflow5 || []" :sum="fundSummary[scope.row.code]?.sum5 || 0" />
+          <FundFlowSpark compact :values="fundSummary[scope.row.code]?.mainNetInflow5 || []" :sum="fundSummary[scope.row.code]?.sum5 || 0" />
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="140" fixed="right" align="center">
+      <el-table-column prop="updatedAt" label="修改时间" min-width="76" align="center" sortable :sort-method="sortByUpdatedAt">
         <template #default="scope">
-          <el-button link type="primary" @click.stop="openEditDialog(scope.row)">修改</el-button>
-          <el-button link type="danger" @click.stop="deleteRow(scope.row)">删除</el-button>
+          <div class="updated-at-cell">
+            <span class="updated-at-time">{{ formatUpdatedDate(scope.row.updatedAt) }}</span>
+            <span class="updated-at-clock">
+              {{ formatUpdatedClock(scope.row.updatedAt) }}
+              <span v-if="isToday(scope.row.updatedAt)" class="updated-at-badge">已核</span>
+            </span>
+          </div>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="操作" min-width="78" align="center">
+        <template #default="scope">
+          <div class="op-actions">
+            <el-button link type="primary" @click.stop="openEditDialog(scope.row)">修改</el-button>
+            <el-button link type="danger" @click.stop="deleteRow(scope.row)">删除</el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -1039,6 +1166,17 @@ watch(appRefreshSignal, () => {
       <el-form-item label="成本价">
         <el-input-number v-model="editForm.costPrice" :min="0" :step="0.001" :precision="3" />
       </el-form-item>
+      <div class="dividend-zone">
+        <el-button size="small" :loading="dividendLoading" @click="doDividendPreview">🎁 按最新分红除权试算</el-button>
+        <div v-if="dividendError" class="dividend-error">{{ dividendError }}</div>
+        <div v-if="dividendPreview" class="dividend-card">
+          <div class="dividend-summary">最近分红：{{ dividendPreview.summary }}</div>
+          <div class="dividend-result">
+            <span>除息后参考成本：<b class="dividend-new-cost">¥{{ Number(dividendPreview.new_cost).toFixed(3) }}</b></span>
+            <el-button size="small" type="primary" plain @click="applyDividendCost">一键填入新成本</el-button>
+          </div>
+        </div>
+      </div>
       <el-form-item label="持仓数量">
         <el-input-number v-model="editForm.quantity" :min="0" :step="10" />
       </el-form-item>
@@ -1259,34 +1397,64 @@ watch(appRefreshSignal, () => {
 }
 
 /* 调大表格主体内容字体 */
-:deep(.el-table) {
-  font-size: 16px; /* 默认是14px，改为16px或者更大 */
+/* ---- 持仓表：紧凑列宽，一屏放下不出现横向滚动条 ---- */
+.portfolio-table {
+  width: 100%;
 }
 
-:deep(.el-table .profit-positive-cell) {
+:deep(.portfolio-table) {
+  font-size: 13px;
+}
+
+:deep(.portfolio-table .el-table__cell) {
+  padding: 6px 0;
+}
+
+/* 单元格左右留白压到最小，给数字腾出宽度 */
+:deep(.portfolio-table th.el-table__cell .cell),
+:deep(.portfolio-table td.el-table__cell .cell) {
+  padding-left: 4px;
+  padding-right: 4px;
+  line-height: 1.3;
+  /* 数字一律不折行，行高保持一致 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:deep(.portfolio-table .profit-positive-cell) {
   color: #f56c6c;
 }
 
-:deep(.el-table .risk-row td.el-table__cell) {
+:deep(.portfolio-table .risk-row td.el-table__cell) {
   background-color: #fff7d6 !important;
 }
 
-:deep(.el-table th.el-table__cell) {
-  /* 表头稍微比内容大一点 */
-  font-size: 18px;
+:deep(.portfolio-table th.el-table__cell) {
+  font-size: 13px;
   background-color: #e3f2fd;
   color: #333;
-  font-weight: bold;
+  font-weight: 700;
 }
 
-/* 如果觉得字体变大后行高太挤，可以调大单元格的 padding */
-:deep(.el-table .el-table__cell) {
-  padding: 8px 0; /* 增加上下内边距，让行变宽 */
-}
-
-:deep(.el-table__footer-wrapper tbody td.el-table__cell) {
+:deep(.portfolio-table .el-table__footer-wrapper tbody td.el-table__cell) {
   font-weight: bold;
   background-color: #f5f7fa;
+}
+
+/* 操作列：两个按钮强制同行，不换行 */
+.op-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.op-actions :deep(.el-button) {
+  margin-left: 0;
+  padding: 0 2px;
+  font-size: 12px;
 }
 
 @media (max-width: 960px) {
@@ -1339,14 +1507,110 @@ watch(appRefreshSignal, () => {
   cursor: pointer;
   font-weight: 600;
   color: #21384f;
+  white-space: nowrap;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 .name-cell:hover {
   color: #1d4ed8;
 }
 .name-report-icon {
-  font-size: 0.72rem;
-  opacity: 0.7;
+  font-size: 0.68rem;
+  opacity: 0.55;
+  margin-left: 1px;
+}
+.lhb-badge {
   margin-left: 2px;
+  font-size: 0.72rem;
+  cursor: help;
+}
+
+/* ---- 修改时间（日期/时间两行，省宽度） ---- */
+.updated-at-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  line-height: 1.25;
+}
+
+.updated-at-time {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+  color: #445a73;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.updated-at-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #6b7c93;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+  white-space: nowrap;
+}
+
+.updated-at-badge {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #dcfce7;
+  color: #16a34a;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* ---- 分红除权试算 ---- */
+.dividend-zone {
+  margin: -4px 0 14px 110px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.dividend-error {
+  color: #d17057;
+  font-size: 0.82rem;
+}
+
+.dividend-card {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dividend-summary {
+  color: #1e3a8a;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.dividend-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #334155;
+  font-size: 0.86rem;
+}
+
+.dividend-new-cost {
+  color: #059669;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95rem;
 }
 
 </style>

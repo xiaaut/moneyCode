@@ -55,8 +55,11 @@ class Position(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # 注意：updated_at 仅在用户主动「新增/修改持仓」时由接口显式写入 func.now()，
+    # 严禁加 onupdate=func.now() —— 否则后台「刷新现价 / 收盘一键更新」通过 ORM 更新
+    # current_price 时会顺带把 updated_at 也刷新，破坏「最近整理时间」的隔离语义。
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 

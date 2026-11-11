@@ -43,6 +43,7 @@ my-finance-system/
 │   ├── migrate_kline.py              # stock_kline_daily 表建表（CREATE TABLE IF NOT EXISTS，幂等）
 │   ├── migrate_financials.py         # 财报三表/笔记表建表（stock_financial_statements + stock_analysis_notes）
 │   ├── migrate_rebalance.py          # rebalance_plans 表建表（调仓工单，CREATE TABLE IF NOT EXISTS，幂等）
+│   ├── migrate_positions_updated_at.py # positions.updated_at 隔离迁移（存量锚定 2026-01-01，幂等）
 │   └── app/
 │       ├── main.py                   # 入口：lifespan + CORS + 路由挂载 + 统一异常
 │       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池、同花顺数据源）
@@ -152,8 +153,10 @@ my-finance-system/
 
 ### 3.2 positions（22 行）— 当前持仓
 
-`id`(bigint PK) · `code`(varchar **unique**+index) · `name` · `shares`(int) · `cost_price` · `current_price` · `market_value` · `profit_amount` · `profit_ratio` · `sector` · `position_ratio` · `extra`(jsonb) · 时间戳。
+`id`(bigint PK) · `code`(varchar **unique**+index) · `name` · `shares`(int) · `cost_price` · `current_price` · `market_value` · `profit_amount` · `profit_ratio` · `sector` · `position_ratio` · `extra`(jsonb) · `created_at` · `updated_at`。
 > 市值/盈亏/占比为按现价的快照值；同一代码多条持仓在迁移时按股数加权合并成本。
+>
+> **updated_at 隔离铁律**：仅用户主动「新增持仓 `POST /api/portfolio/positions` / 修改持仓 `PUT /api/portfolio/positions/{code}`」时刷新为当前时间；后台「刷新现价 / 刷新 ROE / 收盘一键更新」只更新 stocks/kline/financials，**严禁触碰 positions.updated_at**（模型已移除 `onupdate`，整数组覆盖 `POST /api/portfolio` 也不更新该字段）。存量记录由 `migrate_positions_updated_at.py` 统一锚定为 `2026-01-01 00:00:00+08`，便于区分「尚未整理」。
 
 ### 3.3 trade_history（0 行）— 已清仓/历史成交
 
@@ -230,9 +233,10 @@ my-finance-system/
 |---|---|---|
 | GET | `/api/portfolio` | 持仓列表（纯数组，camelCase） |
 | POST | `/api/portfolio` | 整数组覆盖持仓（按 code upsert + 删除多余） |
-| POST | `/api/portfolio/positions` | 新增/修改单条持仓 |
-| PUT | `/api/portfolio/positions/{code}` | 按代码修改持仓 |
+| POST | `/api/portfolio/positions` | 新增/修改单条持仓（刷新 updated_at，异步触发 auto_onboard_stock） |
+| PUT | `/api/portfolio/positions/{code}` | 按代码修改持仓（刷新 updated_at） |
 | DELETE | `/api/portfolio/{code}` | 删除持仓（`archive=true` 时写入 trade_history） |
+| GET | `/api/portfolio/positions/{code}/dividend-preview` | 分红除权成本试算（`current_cost=`/`current_shares=` 可选，主通道同花顺 adjustment-factors + 东财 RPT_SHAREBONUS_DET 备用） |
 | GET | `/api/watchlist` | 观察列表 |
 | POST | `/api/watchlist` | 整数组覆盖观察列表 |
 | POST | `/api/watchlist/items` | 新增单条观察项 |

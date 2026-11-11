@@ -43,6 +43,9 @@ class PositionOut(CamelModel):
     peg: str = DASH
     expected_return: str = DASH
 
+    # 最近修改时间（ISO 8601），仅在用户主动新增/修改持仓时更新
+    updated_at: str | None = None
+
 
 class PositionIn(CamelModel):
     """POST /api/portfolio 单行入参（整数组覆盖时逐行校验）。"""

@@ -57,6 +57,25 @@ def _report_name_to_q(name: str) -> str:
     return f"{match.group(1)}{quarter}"
 
 
+def _report_label_of(report_date: str) -> str:
+    """'2025-12-31' -> '2025年报'; '2025-06-30' -> '2025中报'; '2025-09-30' -> '2025三季报'。"""
+    value = str(report_date or "")[:10]
+    try:
+        year, month, _ = value.split("-")
+    except ValueError:
+        return str(report_date or "")
+    labels = {"03": "一季报", "06": "中报", "09": "三季报", "12": "年报"}
+    return f"{year}{labels.get(month, '')}"
+
+
+def _date_of(value: str) -> date | None:
+    """'2026-06-15 00:00:00' -> date(2026, 6, 15)。"""
+    try:
+        return date.fromisoformat(str(value or "")[:10])
+    except ValueError:
+        return None
+
+
 class FreeClient:
     """免费通道客户端，方法契约与 ths_client 对齐。"""
 
@@ -156,6 +175,51 @@ class FreeClient:
             "net_profit_yoy": _num(row.get("PARENTNETPROFITTZ")),
             "gross_margin": _num(row.get("XSMLL")),
             "report_period": _report_name_to_q(row.get("REPORT_DATE_NAME")),
+        }
+
+    # ------------------------------------------------------------------ #
+    # 分红配送（东财，作为除权试算备用通道）
+    # ------------------------------------------------------------------ #
+    async def get_dividend_preview(self, code: str) -> dict[str, Any] | None:
+        """东财分红送配最新一期，返回 {report_label, ex_date, cash_div_per_share, bonus_share_ratio, progress}。
+
+        报告期字段（REPORT_DATE）是同花顺除复权接口没有的，故东财通道信息更完整。
+        """
+        params = {
+            "reportName": "RPT_SHAREBONUS_DET",
+            "columns": "ALL",
+            "filter": f'(SECURITY_CODE="{code}")',
+            "sortColumns": "EX_DIVIDEND_DATE",
+            "sortTypes": "-1",
+            "pageNumber": "1",
+            "pageSize": "5",
+            "source": "HSF10",
+            "client": "PC",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT, headers=BASE_HEADERS) as client:
+                resp = await client.get(
+                    FINANCE_URL, params=params, headers={"Referer": "https://data.eastmoney.com/"}
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("东财分红配送请求失败 %s: %s", code, exc)
+            return None
+
+        rows = ((payload or {}).get("result") or {}).get("data") or []
+        if not rows:
+            return None
+        row = rows[0]
+        # 每 10 股派息/送转 -> 每股
+        pretax_10 = _num(row.get("PRETAX_BONUS_RMB")) or 0.0
+        it_ratio = _num(row.get("IT_RATIO") or row.get("BONUS_IT_RATIO")) or 0.0
+        return {
+            "report_label": _report_label_of(row.get("REPORT_DATE")),
+            "ex_date": _date_of(row.get("EX_DIVIDEND_DATE")),
+            "cash_div_per_share": round(pretax_10 / 10, 4),
+            "bonus_share_ratio": round(it_ratio / 10, 4),
+            "progress": str(row.get("ASSIGN_PROGRESS") or ""),
         }
 
     # ------------------------------------------------------------------ #

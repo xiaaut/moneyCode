@@ -4,6 +4,7 @@ import { computed } from 'vue';
 const props = defineProps({
   values: { type: Array, default: () => [] },
   sum: { type: Number, default: 0 },
+  compact: { type: Boolean, default: false },
 });
 
 const bars = computed(() => {
@@ -38,8 +39,8 @@ const sumClass = computed(() => {
 </script>
 
 <template>
-  <div class="spark" v-if="bars.length">
-    <svg :width="bars.length * (BAR_W + GAP)" height="28" viewBox="0 0 60 28" preserveAspectRatio="none">
+  <div class="spark" :class="{ compact: props.compact }" v-if="bars.length">
+    <svg :width="bars.length * (BAR_W + GAP)" :height="props.compact ? 20 : 28" viewBox="0 0 60 28" preserveAspectRatio="none">
       <line x1="0" y1="14" x2="60" y2="14" stroke="#c6d2e0" stroke-width="0.5" />
       <rect
         v-for="(b, i) in bars"
@@ -52,7 +53,7 @@ const sumClass = computed(() => {
         rx="1"
       />
     </svg>
-    <div class="sum" :class="sumClass">5日 {{ sumText }}</div>
+    <div class="sum" :class="sumClass">{{ props.compact ? sumText : `5日 ${sumText}` }}</div>
   </div>
   <div v-else class="spark-empty">-</div>
 </template>
@@ -68,6 +69,15 @@ const sumClass = computed(() => {
 .sum {
   font-size: 11px;
   white-space: nowrap;
+}
+/* 紧凑模式：给窄列用 */
+.spark.compact {
+  gap: 2px;
+  line-height: 1.1;
+}
+.spark.compact .sum {
+  font-size: 10px;
+  letter-spacing: -0.2px;
 }
 .up {
   color: #e34d4d;

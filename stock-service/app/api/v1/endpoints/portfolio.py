@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -24,6 +24,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.free_client import free_client
+from app.adapters.ths_client import ThsUnavailableError, ths_client
 from app.db.session import get_db
 from app.models import Position, TradeHistory, WatchlistItem
 from app.schemas.common import OkResponse, fmt_num, fmt_pct, num_or_dash, parse_number
@@ -91,6 +93,7 @@ def _position_to_out(position: Position, total_market_value: float) -> PositionO
         expected_return=(
             fmt_pct(extra.get("expected_return")) if extra.get("expected_return") is not None else DASH
         ),
+        updated_at=position.updated_at.isoformat() if position.updated_at else None,
     )
 
 
@@ -247,11 +250,14 @@ async def replace_positions(
 
     table = Position.__table__
     statement = pg_insert(table).values(rows)
-    updatable = [c.name for c in table.columns if c.name not in {"id", "code", "created_at"}]
+    # 整数组覆盖仅同步行情/衍生字段，严禁刷新 updated_at（隔离铁律：
+    # 前端「刷新现价/ROE」走此接口回写，绝不能污染「最近整理时间」）。
+    updatable = [
+        c.name for c in table.columns if c.name not in {"id", "code", "created_at", "updated_at"}
+    ]
     statement = statement.on_conflict_do_update(
         index_elements=["code"],
-        set_={name: statement.excluded[name] for name in updatable}
-        | {"updated_at": func.now()},
+        set_={name: statement.excluded[name] for name in updatable},
     )
     await db.execute(statement)
     await db.commit()
@@ -275,7 +281,10 @@ async def upsert_position(
 
     table = Position.__table__
     statement = pg_insert(table).values(row)
-    updatable = [c.name for c in table.columns if c.name not in {"id", "code", "created_at"}]
+    # 用户主动「新增/修改持仓」：显式刷新 updated_at 为当前时间（隔离铁律的另一半）
+    updatable = [
+        c.name for c in table.columns if c.name not in {"id", "code", "created_at", "updated_at"}
+    ]
     statement = statement.on_conflict_do_update(
         index_elements=["code"],
         set_={name: statement.excluded[name] for name in updatable} | {"updated_at": func.now()},
@@ -301,6 +310,129 @@ async def update_position(
 ) -> PositionOut:
     payload.code = code
     return await upsert_position(payload, db)
+
+
+# --------------------------------------------------------------------------- #
+# 分红除权成本试算
+# --------------------------------------------------------------------------- #
+def _infer_report_label(ex_date: date | None) -> str:
+    """除息日反推报告期（同花顺除复权接口不返回报告期，仅 ex_date）。
+
+    惯例：5-7 月除息 -> 上一年年报；8-10 月 -> 当年中报；11-12 月 -> 当年三季报。
+    """
+    if not ex_date:
+        return ""
+    year, month = ex_date.year, ex_date.month
+    if 5 <= month <= 7:
+        return f"{year - 1}年报"
+    if 8 <= month <= 10:
+        return f"{year}中报"
+    if 11 <= month <= 12:
+        return f"{year}三季报"
+    return f"{year - 1}三季报"
+
+
+@router.get(
+    "/portfolio/positions/{code}/dividend-preview", summary="单股分红除权成本试算",
+)
+async def dividend_preview(
+    code: str,
+    current_cost: float | None = Query(None, description="当前成本价，缺省读持仓表"),
+    current_shares: int | None = Query(None, description="当前股数，缺省读持仓表"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """查询最近 1~2 年分红送转，按除权除息公式给出建议新成本/新股数。
+
+    主通道同花顺 adjustment-factors，失败降级东财 RPT_SHAREBONUS_DET。
+    """
+    pure = "".join(ch for ch in str(code) if ch.isdigit())[-6:]
+    if len(pure) != 6:
+        raise HTTPException(status_code=400, detail="无效的股票代码")
+
+    # 当前成本/股数：优先用入参，缺省读持仓表
+    position = await db.scalar(select(Position).where(Position.code == pure))
+    cost = float(current_cost) if current_cost is not None else (
+        float(position.cost_price) if position and position.cost_price is not None else 0.0
+    )
+    shares = int(current_shares) if current_shares is not None else (
+        int(position.shares) if position else 0
+    )
+
+    # 近 2 年时间窗
+    today = date.today()
+    from_date = (today - timedelta(days=730)).isoformat()
+
+    event: dict[str, Any] | None = None
+    source = "ths"
+    # 1) 主通道：同花顺除复权事件流（最新一条）
+    try:
+        events = await ths_client.get_adjustment_factors(pure, from_date=from_date)
+        if events:
+            first = events[0]
+            ex_date = first.get("ex_date")
+            event = {
+                "report_label": _infer_report_label(ex_date),
+                "ex_date": ex_date,
+                "cash_div_per_share": first.get("cash_div_per_share") or 0.0,
+                "bonus_share_ratio": first.get("bonus_share_ratio") or 0.0,
+                "progress": "",
+            }
+    except (ThsUnavailableError, Exception) as exc:  # noqa: BLE001
+        event = None
+
+    # 2) 备用通道：东财分红配送（含精确报告期）
+    if not event:
+        source = "free_fallback"
+        preview = await free_client.get_dividend_preview(pure)
+        if preview:
+            event = preview
+
+    if not event:
+        return {
+            "code": pure,
+            "found": False,
+            "message": "近 2 年未查到分红送转记录",
+            "current_cost": round(cost, 3),
+            "current_shares": shares,
+        }
+
+    cash_div = float(event.get("cash_div_per_share") or 0.0)
+    bonus_ratio = float(event.get("bonus_share_ratio") or 0.0)
+    # 除权除息后理论成本 = (当前成本 - 每股派息) / (1 + 送转比例)
+    new_cost = round((cost - cash_div) / (1 + bonus_ratio), 3) if (1 + bonus_ratio) > 0 else cost
+    new_shares = int(shares * (1 + bonus_ratio))
+
+    ex_date = event.get("ex_date")
+    ex_date_str = ex_date.isoformat() if isinstance(ex_date, date) else str(ex_date or "")
+    per10 = cash_div * 10
+    report_label = event.get("report_label") or ""
+
+    # 摘要：如 "2025年报 10派9.00元 (除息日 2026-06-05)"
+    parts = [report_label] if report_label else []
+    if per10 > 0:
+        parts.append(f"10派{per10:.2f}元")
+    if bonus_ratio > 0:
+        parts.append(f"10送{bonus_ratio * 10:g}股")
+    if ex_date_str:
+        parts.append(f"除息日 {ex_date_str}")
+    summary = " ".join(parts)
+
+    return {
+        "code": pure,
+        "found": True,
+        "source": source,
+        "report_label": report_label,
+        "ex_date": ex_date_str,
+        "cash_div_per_share": round(cash_div, 4),
+        "bonus_share_ratio": round(bonus_ratio, 4),
+        "progress": event.get("progress") or "",
+        "summary": summary,
+        "current_cost": round(cost, 3),
+        "current_shares": shares,
+        "new_cost": new_cost,
+        "new_shares": new_shares,
+        "cost_delta": round(new_cost - cost, 3),
+    }
 
 
 @router.delete(
