@@ -591,3 +591,70 @@ python db_sync.py pull-from-nas --no-verify   # 跳过内容指纹校验，更�
 | 只想看差异 | `python db_sync.py status` |
 | 本地库异常 | `cd stock-service && ./pg_local.sh status`，日志 `~/.local/pgdata17/server.log` |
 
+---
+
+## 10. 行业/板块名称统一清洗（2026-11-12）
+
+**问题**：申万二级行业名带分级后缀，各源写法还不一致——同花顺/AKShare 常见 `中药Ⅱ`、`白酒Ⅱ`（全角罗马数字），东财常见 `中药 II`（半角空格 + ASCII）。入库后 `中药` 与 `中药Ⅱ` 会被当成两个行业，行业筛选、行业占比、调仓雷达的「单行业数量」全部失真。
+
+### 10.1 统一函数
+
+`stock-service/app/utils/industry.py`
+
+```python
+INDUSTRY_SUFFIX_RE = re.compile(r"[\s\u3000]*([IⅠⅡⅢⅣV]+)$")   # 半/全角空白 + ASCII/Unicode 罗马数字
+
+def clean_industry_name(val: str | None) -> str:      # None -> ""；保留「整串都是罗马数字」的兜底
+def clean_industry_or_none(val: str | None) -> str | None  # 入库专用：洗成空返回 None，配合 coalesce 不覆盖旧值
+```
+
+样例：`中药 II → 中药`、`白酒 II → 白酒`、`化学制药Ⅱ → 化学制药`、`中药 → 中药`、`None → ""`。
+
+### 10.2 已接入的写入入口（源头拦截）
+
+| 入口 | 位置 | 处理 |
+|---|---|---|
+| AKShare 全市场财报（`所处行业`） | `services/akshare_sync.py::_build_fin_rows` | `clean_industry_or_none` |
+| 统一回写（主备双通道共用） | `services/writeback.py::extract_valid_fields` | 清洗后为空则剔除该字段 |
+| 同花顺主通道单股指标 | `adapters/ths_client.py::get_single_financial_indicators` | 出口清洗 |
+| 免费备用通道单股指标 | `adapters/free_client.py::get_single_financial_indicators` | 出口清洗 |
+| 持仓新增/修改/批量覆盖 → `positions.sector` | `api/v1/endpoints/portfolio.py::_position_row` | `clean_industry_or_none` |
+| 持仓行业回填 `stocks.industry` | `portfolio.py::_sync_stocks_from_positions` | `clean_industry_or_none` |
+| MSCI 分析（东财 `EM2016`，形如 `医药生物-中药Ⅱ`） | `services/jobs.py` | `clean_industry_name` |
+| 历史 JSON 导入 | `migrate_json.py`（positions / stocks 两处） | `clean_industry_or_none` |
+
+`daily_sync.py` 的五合一流水线第 2 步调 `akshare_sync.run_akshare_sync`，天然覆盖；观察列表无行业字段，无需处理。
+
+### 10.3 存量清洗（只改单列，绝不碰 updated_at）
+
+⚠️ 注意：PostgreSQL 正则**不支持** `\u3000` 转义，`'[\s\u3000]*'` 里的 `\u` 会被当成字面量 `u`。必须写字面全角空格：
+
+```sql
+BEGIN;
+UPDATE stocks
+SET industry = trim(regexp_replace(trim(industry), '[[:space:]　]*[IⅠⅡⅢⅣV]+$', ''))
+WHERE industry ~ '[IⅠⅡⅢⅣV]+$';
+
+-- positions 只 SET sector 单列；表上无触发器，updated_at 不会被连带刷新
+UPDATE positions
+SET sector = trim(regexp_replace(trim(sector), '[[:space:]　]*[IⅠⅡⅢⅣV]+$', ''))
+WHERE sector ~ '[IⅠⅡⅢⅣV]+$';
+COMMIT;
+```
+
+执行结果：`stocks` 更新 956 行、`positions` 更新 11 行；`positions.updated_at` 的 md5 指纹改前改后完全一致（25 行逐行比对 0 变化）。
+
+### 10.4 验证记录
+
+- `stocks.industry` 与 `positions.sector` 命中后缀的行数均为 **0**；`stocks` 无空串（NULL 356 行为 ETF/未采集标的，正常）
+- 指定个股双表一致：`000423 东阿阿胶`、`000538 云南白药`、`002349 精华制药`、`600085 同仁堂`、`600129 太极集团` → `中药`；`000568 泸州老窖` → `白酒`
+- 真实单股同步（`POST /stocks/refresh-single/600085`，走同花顺主通道 `source=ths`）后库内仍为 `中药`
+- 脏值守卫：向 `writeback_stock` 直接灌 `中药Ⅱ` 与 `" 中药 II "`，库内落库结果均为 `中药`
+- 清洗前后 `distinct industry`：134 → 132（`中药/中药Ⅱ`、`白酒/白酒Ⅱ` 两组归并）
+
+### 10.5 后续维护约定
+
+1. **任何新的写库入口都必须调用 `clean_industry_or_none`**，否则又会带进后缀；
+2. 新增「行业敏感」的 SQL 清洗时，务必只 SET 目标列，`positions.updated_at` 是用户的整理时间锚点，不得触碰；
+3. 若上游出现以 ASCII `I/V` 结尾且前面没有空白的行业名（例如 `AI`），现有正则会把末位 `I` 当后缀剥掉——届时改为「仅当后缀前有空白或整串为罗马数字时才剥离」。
+

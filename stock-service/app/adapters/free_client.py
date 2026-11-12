@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from app.services.quotes import quote_service
+from app.utils.industry import clean_industry_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,8 @@ class FreeClient:
 
         finance = await self._single_finance(code)
         result.update(finance)
+        # 行业名出口统一清洗（东财可能返回「中药 II」这类半角空格 + 罗马数字后缀）
+        result["industry"] = clean_industry_or_none(result.get("industry"))
         result["source"] = "free_fallback"
         return result
 

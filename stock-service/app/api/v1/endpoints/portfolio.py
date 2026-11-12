@@ -30,6 +30,7 @@ from app.db.session import get_db
 from app.models import Position, TradeHistory, WatchlistItem
 from app.schemas.common import OkResponse, fmt_num, fmt_pct, num_or_dash, parse_number
 from app.services import onboarding
+from app.utils.industry import clean_industry_or_none
 from app.schemas.portfolio import (
     ClosedPositionCreate,
     PositionIn,
@@ -116,7 +117,7 @@ def _position_row(payload: PositionIn) -> dict[str, Any]:
     return {
         "code": code,
         "name": name,
-        "sector": payload.sector,
+        "sector": clean_industry_or_none(payload.sector),
         "shares": shares,
         "cost_price": cost_price,
         "current_price": current_price,
@@ -494,7 +495,7 @@ async def _sync_stocks_from_positions(db: AsyncSession, rows: list[dict[str, Any
             {
                 "code": row["code"],
                 "name": row["name"],
-                "industry": row.get("sector"),
+                "industry": clean_industry_or_none(row.get("sector")),
                 "pe_ttm": extra.get("pe"),
                 "pb": extra.get("pb"),
                 "roe": extra.get("roe"),

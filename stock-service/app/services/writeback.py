@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Stock
+from app.utils.industry import clean_industry_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,14 @@ def extract_valid_fields(data: dict[str, Any]) -> dict[str, Any]:
         value = _clean(_get(data, *keys))
         if value is not None and value != 0:
             fields[column] = float(value) if isinstance(value, (int, float)) else value
+
+    # 行业统一清洗：剔除「中药Ⅱ / 中药 II」等分级后缀；
+    # 洗成空则不写入，配合 set_map 的 coalesce 保留库内已有值。
+    industry = clean_industry_or_none(fields.get("industry"))
+    if industry:
+        fields["industry"] = industry
+    else:
+        fields.pop("industry", None)
 
     # 名称：非空字符串才更新
     name = _get(data, "name")

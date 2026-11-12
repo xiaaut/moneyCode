@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.utils.industry import clean_industry_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +407,8 @@ class ThsClient:
         if eps is not None:
             result["eps_current"] = eps
 
+        # 行业名出口统一清洗（同花顺可能返回「中药Ⅱ」这类分级后缀）
+        result["industry"] = clean_industry_or_none(result.get("industry"))
         result["source"] = "ths"
         return result
 

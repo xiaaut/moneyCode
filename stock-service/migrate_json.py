@@ -39,6 +39,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 import app.models  # noqa: F401  注册全部模型
 from app.core.config import BASE_DIR, settings
 from app.db.session import AsyncSessionLocal, engine
+from app.utils.industry import clean_industry_or_none
 from app.models import (
     GridStrategy,
     GridTradeRecord,
@@ -273,7 +274,7 @@ def collect_position_rows(data_dir: Path) -> tuple[list[dict], list[dict], dict[
                 "market_value": market_value,
                 "profit_amount": profit,
                 "profit_ratio": profit_ratio,
-                "sector": bucket["sector"],
+                "sector": clean_industry_or_none(bucket["sector"]),
                 "position_ratio": bucket["position_ratio"],
                 "extra": json_safe(bucket["extra"]),
             }
@@ -284,7 +285,7 @@ def collect_position_rows(data_dir: Path) -> tuple[list[dict], list[dict], dict[
             {
                 "code": bucket["code"],
                 "name": bucket["name"],
-                "industry": bucket["sector"],
+                "industry": clean_industry_or_none(bucket["sector"]),
                 "pb": to_decimal(metrics.get("pb")),
                 "pe_ttm": to_decimal(metrics.get("pe")),
                 "roe": to_decimal(metrics.get("roe")),
@@ -352,7 +353,9 @@ def collect_stock_rows(data_dir: Path, portfolio_patches: list[dict]) -> tuple[l
             to_text(record.get("code"), 8),
             {
                 "name": to_text(record.get("name"), 64),
-                "industry": to_text(record.get("industry") or record.get("industryGroup"), 128),
+                "industry": clean_industry_or_none(
+                    to_text(record.get("industry") or record.get("industryGroup"), 128)
+                ),
                 "pe_ttm": to_decimal(record.get("peTtm")),
                 "pb": to_decimal(record.get("pb")),
                 "roe": to_decimal(record.get("roe")),

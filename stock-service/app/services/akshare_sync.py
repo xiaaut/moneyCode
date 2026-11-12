@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import AsyncSessionLocal
 from app.models import Stock
 from app.services.jobs import JobState
+from app.utils.industry import clean_industry_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +269,8 @@ def _build_fin_rows(df: Any, period_label: str) -> dict[str, dict[str, Any]]:
             if target in ("code", "name"):
                 continue
             if target == "industry":
-                row[target] = _to_str(record.get(column))
+                # 源头拦截：申万二级行业名常带「Ⅱ / II」分级后缀，入库前统一清洗
+                row[target] = clean_industry_or_none(_to_str(record.get(column)))
             else:
                 row[target] = _to_float(record.get(column))
         result[code] = row

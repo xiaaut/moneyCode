@@ -26,6 +26,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import MsciMeta, Stock
 from app.services import ths as ths_mod
 from app.services.quotes import quote_service
+from app.utils.industry import clean_industry_name
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +404,8 @@ async def _load_org_info_map(client: httpx.AsyncClient) -> dict[str, dict[str, s
                 continue
             mapping[code] = {
                 "name": str(row.get("SECURITY_NAME_ABBR") or "").strip(),
-                "industry": str(row.get("EM2016") or "").strip(),
+                # EM2016 形如「医药生物-中药Ⅱ」，同样需要剥离分级后缀
+                "industry": clean_industry_name(row.get("EM2016")),
             }
         pages = int(data.get("pages") or pages)
         if page >= pages:
