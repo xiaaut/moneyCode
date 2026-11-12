@@ -1,4 +1,6 @@
 # 系统文件
+.logs/
+*.pid
 .DS_Store
 Thumbs.db
 *.log

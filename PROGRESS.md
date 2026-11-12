@@ -534,8 +534,8 @@ export MAMBA_ROOT_PREFIX=$HOME/.local/mamba
 - 二进制：`~/.local/pg17/bin`（psql / pg_ctl / pg_dump 等）
 - 数据目录：`~/.local/pgdata17`，日志 `~/.local/pgdata17/server.log`
 - 认证：`pg_hba.conf` 对 `127.0.0.1` / `::1` 为 **trust 免密**；`postgres` 角色密码同时设为 `mypg123456`，两种方式都能连
-- 自启：`~/.zshrc` 内置静默探活（未运行则 `pg_ctl start`），等效于 `brew services start postgresql@17`
-- 启停脚本：`cd stock-service && ./pg_local.sh {start|stop|restart|status}`
+- 自启：**刻意不设任何系统级自启**（不改 `~/.zshrc`、不装 launchd），需要时手动拉起，不用时彻底停掉
+- 启停脚本：`./dev.sh {start|stop|restart|status}`（项目根，一键管「库 + 后端 + 前端」）；只操作数据库时用 `cd stock-service && ./pg_local.sh {start|stop|status}`
 
 ### 9.2 配置分层（.env）
 
@@ -582,9 +582,12 @@ python db_sync.py pull-from-nas --no-verify   # 跳过内容指纹校验，更�
 
 | 场景 | 操作 |
 |---|---|
-| 每天开工 | 无需操作（zshrc 自动拉起本地库），`uvicorn` / `npm run dev` 照常 |
-| NAS 开机后想备份 | `python db_sync.py push-to-nas` |
+| 每天开工（一条命令起全部） | `cd my-finance-system && ./dev.sh start`（数据库 → 后端 8000 → 前端 3000） |
+| 收工 / 不看盘（0 残留） | `./dev.sh stop`（后端 + 前端 + 数据库全部停止，实测残留进程 0 个） |
+| 改完代码要生效 | `./dev.sh restart`（后端未开 `--reload`，不常驻扫描 .py） |
+| 看三者状态 | `./dev.sh status` |
+| NAS 开机后想备份 | `cd stock-service && python db_sync.py push-to-nas` |
 | 换了新 Mac / 重装 | `python db_sync.py pull-from-nas`（自动建表 + 校准序列） |
 | 只想看差异 | `python db_sync.py status` |
-| 本地库异常 | `./pg_local.sh status` / `restart`，日志 `~/.local/pgdata17/server.log` |
+| 本地库异常 | `cd stock-service && ./pg_local.sh status`，日志 `~/.local/pgdata17/server.log` |
 

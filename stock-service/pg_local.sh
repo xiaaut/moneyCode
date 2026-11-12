@@ -33,7 +33,7 @@ case "${1:-status}" in
       exit 0
     fi
     "$PGBIN/pg_ctl" -D "$PGDATA" -l "$LOG" -w start
-    echo "✅ PostgreSQL 已启动（127.0.0.1:5432，日志 $LOG）"
+    echo "✅ PostgreSQL 已启动（127.0.0.1:5432，日志 ${LOG}）"
     ;;
   stop)
     if ! is_up; then
