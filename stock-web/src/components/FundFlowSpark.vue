@@ -55,7 +55,7 @@ const sumClass = computed(() => {
     </svg>
     <div class="sum" :class="sumClass">{{ props.compact ? sumText : `5日 ${sumText}` }}</div>
   </div>
-  <div v-else class="spark-empty">-</div>
+  <div v-else class="spark-empty" :class="{ compact: props.compact }">-</div>
 </template>
 
 <style scoped>
@@ -91,5 +91,13 @@ const sumClass = computed(() => {
 .spark-empty {
   color: #b0bcc9;
   text-align: center;
+}
+/* 无数据时占位高度对齐紧凑图，保证行高一致 */
+.spark-empty.compact {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  line-height: 1;
 }
 </style>

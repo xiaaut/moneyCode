@@ -506,3 +506,85 @@ VITE_BACKEND_ORIGIN=http://127.0.0.1:9000 pnpm dev
 
 - `stock-web/data/*.json` 与 `data/cache/*.json` 均为历史迁移源文件，`src/` 已无任何引用，仅作备份保留，可安全删除。
 - 「待调仓股票」「分析报告」两个菜单目前是占位项（无组件、无数据），本次不涉及迁移。
+
+---
+
+## 9. 数据库主备角色互换（2026-11-12）
+
+**背景**：飞牛 NAS 不再常开，日常运行必须脱离 NAS。
+
+| 角色 | 位置 | 连接串 | 用途 |
+|---|---|---|---|
+| 主库 Primary | Mac 本地 PostgreSQL 17.11 | `127.0.0.1:5432/portfolio_db` | 日常运行 / 开发，NAS 关机 100% 可用 |
+| 冷备 Backup | 飞牛 NAS PostgreSQL 17.5 | `192.168.31.122:5434/portfolio_db` | 按需开机，仅 `push-to-nas` 备份时连接 |
+
+### 9.1 Mac 本地 PostgreSQL 部署（无 Homebrew 环境）
+
+本机没有 Homebrew、无 `sudo` 权限、GitHub 直连超时，`brew install postgresql@17` 无法执行，改用 **micromamba + conda-forge 官方 PostgreSQL 17.11 二进制**（用户级安装，效果等价）：
+
+```bash
+# 已完成的安装步骤（重装时参考）
+curl -sSL -o mm.tar.bz2 https://micro.mamba.pm/api/micromamba/osx-arm64/latest
+tar -xjf mm.tar.bz2 bin/micromamba && mv bin/micromamba ~/.local/bin/
+export MAMBA_ROOT_PREFIX=$HOME/.local/mamba
+~/.local/bin/micromamba create -y -p $HOME/.local/pg17 -c conda-forge "postgresql=17"
+~/.local/pg17/bin/initdb -D ~/.local/pgdata17 -U postgres --encoding=UTF8 --locale=C -A trust
+```
+
+- 二进制：`~/.local/pg17/bin`（psql / pg_ctl / pg_dump 等）
+- 数据目录：`~/.local/pgdata17`，日志 `~/.local/pgdata17/server.log`
+- 认证：`pg_hba.conf` 对 `127.0.0.1` / `::1` 为 **trust 免密**；`postgres` 角色密码同时设为 `mypg123456`，两种方式都能连
+- 自启：`~/.zshrc` 内置静默探活（未运行则 `pg_ctl start`），等效于 `brew services start postgresql@17`
+- 启停脚本：`cd stock-service && ./pg_local.sh {start|stop|restart|status}`
+
+### 9.2 配置分层（.env）
+
+```dotenv
+# 主库：日常默认
+DATABASE_URL=postgresql+asyncpg://postgres:mypg123456@127.0.0.1:5432/portfolio_db
+# 冷备：NAS 开机时才用
+NAS_DATABASE_URL=postgresql+asyncpg://postgres:mypg123456@192.168.31.122:5434/portfolio_db
+NAS_DB_CONNECT_TIMEOUT=3
+```
+
+- `app/core/config.py`：`ASYNC_DATABASE_URL` 由 `DATABASE_URL` 派生；配置后自动回填 `POSTGRES_HOST/PORT/DB`，`/health` 展示的永远是真实主库。
+- `POSTGRES_*` 仅作兜底（`DATABASE_URL` 留空时生效），`.env.example` 中已注释。
+- **运行期除 `db_sync.py` 外无任何 NAS 依赖**（全仓已核查无硬编码 NAS IP）。
+
+### 9.3 db_sync.py 用法
+
+```bash
+cd stock-service
+
+python db_sync.py pull-from-nas   # NAS -> Mac：首次迁移 / 从冷备恢复
+python db_sync.py push-to-nas     # Mac -> NAS：NAS 开机后推送备份（离线自动安全退出）
+python db_sync.py status          # 双库逐表行数对比（NAS 离线自动降级）
+python db_sync.py pull-from-nas --no-verify   # 跳过内容指纹校验，更快
+```
+
+实现要点：
+
+1. **表结构对齐**：以 `Base.metadata` 为准 `create_all`，再逐列 `ALTER TABLE ADD COLUMN IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`，自动吃到所有 `migrate_*.py` 里的最新字段与索引，新库无需跑 migrate。
+2. **数据搬运**：asyncpg `COPY ... TO STDOUT`（CSV）→ 临时文件 → `COPY ... FROM STDIN`，**单事务**内 `TRUNCATE ... RESTART IDENTITY CASCADE` + 逐表搬运，失败整单回滚，42k 行约 1 秒。
+3. **序列校准**：对每个 SERIAL / IDENTITY 列执行 `setval(pg_get_serial_sequence(...), MAX(col))`，Mac 新增记录不会主键冲突。
+4. **结果校验**：逐表行数 + 内容指纹（`ROW(显式列序)::text` 的 md5 聚合，规避两端物理列序不同导致的误报）。
+5. **离线处理**：NAS 探活 2~3 秒超时，`status` 打印「NAS 当前离线（Mac 本地主库独立运行中）」，`push-to-nas` 打印「NAS 当前离线，已安全退出」并返回码 1，主库不受影响。
+
+### 9.4 首次迁移结果（2026-11-12）
+
+- 迁移 15 张表 / 42,587 行，耗时 0.87 s，行数与内容指纹 **100% 一致**
+- `push-to-nas` 反向验证通过（1.62 s），NAS 端序列同样校准
+- 后端切库后 `/health` 返回 `host=127.0.0.1 port=5432 latency≈3ms`
+- 前端实机（headless Chrome）逐页验证：持仓股票(25 行)、已清仓、A股全市场(5940 只)、MSCI数据、国资控股、资金与异动、选股策略、待调仓股票(21 信号)、观察列表、网格交易、分析报告(健康分 76)、详情抽屉 K 线全部正常
+- 已知外部限制：`/api/fund-flow/market-rank` 依赖东方财富 push2，触发 IP 限流时前端显示「读取排行榜失败：HTTP 500」，与数据库无关，约 5 分钟后自恢复
+
+### 9.5 日常操作约定
+
+| 场景 | 操作 |
+|---|---|
+| 每天开工 | 无需操作（zshrc 自动拉起本地库），`uvicorn` / `npm run dev` 照常 |
+| NAS 开机后想备份 | `python db_sync.py push-to-nas` |
+| 换了新 Mac / 重装 | `python db_sync.py pull-from-nas`（自动建表 + 校准序列） |
+| 只想看差异 | `python db_sync.py status` |
+| 本地库异常 | `./pg_local.sh status` / `restart`，日志 `~/.local/pgdata17/server.log` |
+

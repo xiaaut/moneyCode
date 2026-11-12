@@ -165,6 +165,10 @@ const dividendLoading = ref(false);
 const dividendPreview = ref(null);
 const dividendError = ref('');
 
+// 黄底行悬停说明
+const riskTip = ref({ visible: false, x: 0, y: 0, name: '', reasons: [] });
+let riskTipRowIndex = -1;
+
 const redColumnsWhenProfitPositive = new Set(['code', 'name', 'sector', 'costPrice', 'quantity', 'currentPrice', 'totalCost', 'marketValue', 'profitAmount', 'profitRatio', 'positionRatio']);
 
 const tableCellClassName = ({ row, column }) => {
@@ -174,20 +178,89 @@ const tableCellClassName = ({ row, column }) => {
   return '';
 };
 
-const tableRowClassName = ({ row }) => {
-  const gText = String(row.g || '')
-    .replace('%', '')
-    .trim();
-  const rText = String(row.expectedReturn || '')
-    .replace('%', '')
-    .trim();
-  const gNum = Number(gText);
-  const rNum = Number(rText);
-  if ((Number.isFinite(gNum) && gNum < 10) || (Number.isFinite(rNum) && rNum <= 0)) {
-    return 'risk-row';
+// ---- 风险行（黄底）：3年EPS复合增速 < 10% 或 持有3年预期年化 <= 0 ----
+const RISK_GROWTH_THRESHOLD = 10;
+const RISK_TIP_WIDTH = 252;
+const RISK_TIP_HEIGHT = 104;
+
+// 显式判空：'-' / '' / null 一律返回 null，避免 Number('') === 0 把缺失值误判成「零增长」
+function parsePercent(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).replace('%', '').trim();
+  if (!text || text.startsWith('-')) {
+    // 纯占位符 '-'/'--' 视为缺失；'-5.20' 这类负数继续走数值解析
+    if (!/\d/.test(text)) return null;
   }
-  return '';
-};
+  const num = Number(text);
+  return Number.isFinite(num) ? num : null;
+}
+
+function evaluateRisk(row) {
+  const growth = parsePercent(row?.g);
+  const expected = parsePercent(row?.expectedReturn);
+  const reasons = [];
+  if (growth !== null && growth < RISK_GROWTH_THRESHOLD) {
+    reasons.push({
+      key: 'g',
+      label: '3年EPS复合增速',
+      value: `${growth.toFixed(2)}%`,
+      rule: `告警线 < ${RISK_GROWTH_THRESHOLD}%`,
+    });
+  }
+  if (expected !== null && expected <= 0) {
+    reasons.push({
+      key: 'er',
+      label: '持有3年预期年化',
+      value: `${expected.toFixed(2)}%`,
+      rule: '告警线 ≤ 0%',
+    });
+  }
+  return reasons.length ? { reasons } : null;
+}
+
+const tableRowClassName = ({ row }) => (evaluateRisk(row) ? 'risk-row' : '');
+
+function hideRiskTip() {
+  riskTipRowIndex = -1;
+  if (riskTip.value.visible) riskTip.value.visible = false;
+}
+
+// 黄底行悬停说明：按 tbody 的行序回取数据行，避免依赖 el-table 内部 row-key
+function handleRiskTipMove(event) {
+  const tr = event.target instanceof Element ? event.target.closest('tr') : null;
+  const parent = tr && tr.parentElement;
+  if (!tr || !parent || !tr.classList.contains('risk-row')) {
+    hideRiskTip();
+    return;
+  }
+
+  const index = Array.prototype.indexOf.call(parent.children, tr);
+  const row = tableData.value[index];
+  const risk = row ? evaluateRisk(row) : null;
+  if (!risk) {
+    hideRiskTip();
+    return;
+  }
+
+  let x = event.clientX + 16;
+  let y = event.clientY + 16;
+  if (x + RISK_TIP_WIDTH > window.innerWidth - 8) x = event.clientX - RISK_TIP_WIDTH - 14;
+  if (y + RISK_TIP_HEIGHT > window.innerHeight - 8) y = event.clientY - RISK_TIP_HEIGHT - 14;
+
+  if (riskTipRowIndex !== index) {
+    riskTipRowIndex = index;
+    riskTip.value = {
+      visible: true,
+      x,
+      y,
+      name: `${row.name || ''}${row.code ? ` ${row.code}` : ''}`.trim(),
+      reasons: risk.reasons,
+    };
+    return;
+  }
+  riskTip.value.x = x;
+  riskTip.value.y = y;
+}
 
 const formatMoney = n => Number(n).toFixed(2);
 const formatPercent = n => `${n.toFixed(2)}%`;
@@ -999,7 +1072,7 @@ watch(appRefreshSignal, () => {
 </script>
 
 <template>
-  <div class="portfolio-container">
+  <div class="portfolio-container" @mousemove="handleRiskTipMove" @mouseleave="hideRiskTip" @scroll.capture="hideRiskTip">
     <div class="toolbar">
       <el-button type="primary" @click="openAddDialog">新增股票</el-button>
       <el-button @click="openImportDialog">批量导入</el-button>
@@ -1135,6 +1208,13 @@ watch(appRefreshSignal, () => {
         </div>
       </div>
     </section>
+
+    <div v-if="riskTip.visible" class="risk-tip" :style="{ left: `${riskTip.x}px`, top: `${riskTip.y}px` }">
+      <div class="risk-tip-head">⚠️ 黄底行原因 · {{ riskTip.name }}</div>
+      <div v-for="item in riskTip.reasons" :key="item.key" class="risk-tip-line">
+        {{ item.label }} <b>{{ item.value }}</b>（{{ item.rule }}）
+      </div>
+    </div>
   </div>
 
   <el-dialog v-model="addDialogVisible" title="新增股票" width="420px">
@@ -1430,6 +1510,42 @@ watch(appRefreshSignal, () => {
   background-color: #fff7d6 !important;
 }
 
+/* 黄底行 hover 加深一点，暗示这里有说明 */
+:deep(.portfolio-table .risk-row:hover td.el-table__cell) {
+  background-color: #fdefb8 !important;
+}
+
+/* ---- 黄底行悬停说明 ---- */
+.risk-tip {
+  position: fixed;
+  z-index: 3000;
+  width: 252px;
+  padding: 8px 10px;
+  border: 1px solid #f2d492;
+  border-radius: 8px;
+  background: #fffdf5;
+  box-shadow: 0 8px 22px rgba(23, 43, 66, 0.16);
+  color: #445a73;
+  font-size: 12px;
+  line-height: 1.55;
+  pointer-events: none;
+}
+
+.risk-tip-head {
+  margin-bottom: 3px;
+  font-weight: 700;
+  color: #b45309;
+}
+
+.risk-tip-line {
+  white-space: nowrap;
+}
+
+.risk-tip-line b {
+  color: #b45309;
+  font-variant-numeric: tabular-nums;
+}
+
 :deep(.portfolio-table th.el-table__cell) {
   font-size: 13px;
   background-color: #e3f2fd;
@@ -1518,9 +1634,9 @@ watch(appRefreshSignal, () => {
   color: #1d4ed8;
 }
 .name-report-icon {
-  font-size: 0.68rem;
-  opacity: 0.55;
-  margin-left: 1px;
+  font-size: 0.95rem;
+  opacity: 0.8;
+  margin-left: 2px;
 }
 .lhb-badge {
   margin-left: 2px;

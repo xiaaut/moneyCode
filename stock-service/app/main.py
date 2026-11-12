@@ -1,6 +1,6 @@
 """stock-service 服务入口。
 
-- lifespan：启动时探活 NAS 数据库（失败不阻断启动，由健康检查持续反映真实状态），
+- lifespan：启动时探活主库（Mac 本地 PostgreSQL，失败不阻断启动，由健康检查持续反映真实状态），
   关闭时释放连接池。
 - CORS：放行 Vite 开发服务器 http://localhost:5173。
 - GET /api/v1/health：真实执行 SELECT 1，返回数据库连通性与耗时。
@@ -33,19 +33,19 @@ logger = logging.getLogger("stock_service")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("启动 %s v%s", settings.APP_NAME, settings.APP_VERSION)
-    # 启动探活：NAS 可能临时不可达，此处只告警，不阻断服务启动
+    # 启动探活：主库（Mac 本地）异常只告警，不阻断服务启动
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         logger.info(
-            "NAS 数据库连接成功 -> %s:%s/%s",
+            "主库数据库连接成功 -> %s:%s/%s",
             settings.POSTGRES_HOST,
             settings.POSTGRES_PORT,
             settings.POSTGRES_DB,
         )
     except Exception as exc:  # noqa: BLE001 - 启动阶段需要吞掉所有连接异常
         logger.warning(
-            "NAS 数据库首次连接失败（服务仍启动，请检查 .env 与 NAS 网络）: %s: %s",
+            "主库数据库首次连接失败（服务仍启动，请检查 .env 中的 DATABASE_URL）: %s: %s",
             type(exc).__name__,
             exc,
         )
