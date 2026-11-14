@@ -2,44 +2,56 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "1. 启动后端 (FastAPI)",
+      "label": "后端 + 数据库（左）",
       "type": "shell",
-      "command": "${workspaceFolder}/stock-service/.venv/bin/uvicorn app.main:app --reload --port 8000",
-      "windows": {
-        "command": "${workspaceFolder}\\stock-service\\.venv\\Scripts\\uvicorn.exe app.main:app --reload --port 8000"
-      },
+      "command": "bash .vscode/scripts/backend.sh",
       "options": {
-        "cwd": "${workspaceFolder}/stock-service"
+        "cwd": "${workspaceFolder}"
       },
       "isBackground": true,
+      "problemMatcher": [],
       "presentation": {
-        "group": "fullstack",
-        "panel": "shared"
+        "group": "dev-split",
+        "panel": "shared",
+        "reveal": "always",
+        "focus": false,
+        "clear": true,
+        "showReuseMessage": false
+      },
+      "runOptions": {
+        "instanceLimit": 1
       }
     },
     {
-      "label": "2. 启动前端 (Vue 3)",
+      "label": "前端（右）",
       "type": "shell",
-      "command": "pnpm dev",
+      "command": "bash .vscode/scripts/frontend.sh",
       "options": {
-        "cwd": "${workspaceFolder}/stock-web"
+        "cwd": "${workspaceFolder}"
       },
       "isBackground": true,
+      "problemMatcher": [],
       "presentation": {
-        "group": "fullstack",
-        "panel": "shared"
+        "group": "dev-split",
+        "panel": "shared",
+        "reveal": "always",
+        "focus": false,
+        "clear": true,
+        "showReuseMessage": false
+      },
+      "runOptions": {
+        "instanceLimit": 1
       }
     },
     {
-      "label": "🚀 一键启动全栈服务",
-      "dependsOn": ["1. 启动后端 (FastAPI)", "2. 启动前端 (Vue 3)"],
+      "label": "🚀 启动前后端（左右分屏）",
+      "dependsOn": ["后端 + 数据库（左）", "前端（右）"],
+      "dependsOrder": "parallel",
       "group": {
         "kind": "build",
         "isDefault": true
       },
-      "presentation": {
-        "reveal": "always"
-      }
+      "problemMatcher": []
     }
   ]
 }

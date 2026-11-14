@@ -10,8 +10,8 @@
 # 日志：.logs/backend.log、.logs/frontend.log
 # 说明：进程由你自己的终端持有（nohup 脱离），关掉终端也不会停；
 #       需要彻底让出内存时执行 ./dev.sh stop。
-#       后端刻意不加 --reload：避免后台持续扫描 .py 文件变更。
-#       改完代码需要生效时执行 ./dev.sh restart 即可。
+#       日常开发请用 VS Code 的 Command+Shift+B 左右分屏（见 .vscode/tasks.json），
+#       本脚本是备用通道，后端口径与分屏一致：--reload --reload-dir app。
 
 set -uo pipefail
 
@@ -51,8 +51,8 @@ start_backend() {
   fi
   (
     cd "$SVC" || exit 1
-    nohup .venv/bin/uvicorn app.main:app --port "$BACKEND_PORT" \
-      >>"$LOG/backend.log" 2>&1 &
+    nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" \
+      --reload --reload-dir app >>"$LOG/backend.log" 2>&1 &
     echo $! >"$LOG/backend.pid"
   )
   if wait_port "$BACKEND_PORT" 40; then

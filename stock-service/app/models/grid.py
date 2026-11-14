@@ -36,8 +36,8 @@ class GridStrategy(Base):
     lower_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), comment="网格下限")
 
     mode: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="arithmetic", server_default=text("'arithmetic'"),
-        comment="网格模式：arithmetic 等差 / geometric 等比",
+        String(16), nullable=False, default="geometric", server_default=text("'geometric'"),
+        comment="网格模式(grid_type)：arithmetic 等差 / geometric 等比",
     )
     grid_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=10, server_default=text("10"), comment="档位数量"
@@ -68,6 +68,27 @@ class GridStrategy(Base):
     )
     free_five: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false"), comment="免五"
+    )
+    min_commission: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2), default=Decimal("0.20"), server_default=text("0.20"),
+        comment="单笔最低佣金(元)，免五填 0",
+    )
+    gen_mode: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="step", server_default=text("'step'"),
+        comment="生成方式：range 区间等分 / step 基准价步长",
+    )
+    step_type: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="percent", server_default=text("'percent'"),
+        comment="步长类型：percent 百分比 / amount 固定差价",
+    )
+    step_input: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 4), comment="步长输入的原始值（pct 为百分数，fixed 为元）"
+    )
+    grids_up: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0"), comment="向上卖出格数"
+    )
+    grids_down: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0"), comment="向下买入格数"
     )
 
     last_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), comment="最新价")
@@ -134,9 +155,69 @@ class GridTradeRecord(Base):
         Numeric(18, 2), default=Decimal("0"), server_default=text("0"), comment="本笔已实现盈亏"
     )
     level_index: Mapped[int | None] = mapped_column(Integer, comment="触发档位序号(0 起)")
+    pair_cycle_id: Mapped[str | None] = mapped_column(
+        String(40), comment="手工指定的配对回合 ID；为空则由引擎自动 LIFO 配对"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
     strategy: Mapped[GridStrategy] = relationship(back_populates="trades")
+
+
+class GridCycle(Base):
+    """网格配对回合：一开一平的完整生命周期。
+
+    - LONG_FIRST  + HOLDING_LONG ：低吸买入开仓，等涨到档位卖出价平仓
+    - SHORT_FIRST + WAITING_REBUY：底仓高抛开仓，等回落到档位买入价接回
+    - CLOSED                      ：闭环结清，此时才有 net_profit
+    """
+
+    __tablename__ = "grid_cycles"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, comment="回合 ID：cyc_<开仓成交ID>")
+    strategy_id: Mapped[str] = mapped_column(
+        String(40),
+        ForeignKey("grid_strategies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="所属策略",
+    )
+    code: Mapped[str] = mapped_column(String(8), nullable=False, index=True, comment="标的代码")
+    grid_level: Mapped[int | None] = mapped_column(Integer, index=True, comment="所属档位序号")
+    cycle_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="LONG_FIRST 先买后卖 / SHORT_FIRST 底仓高抛"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True,
+        comment="HOLDING_LONG 持仓待卖 / WAITING_REBUY 高抛待接回 / CLOSED 已闭环",
+    )
+
+    open_trade_id: Mapped[str | None] = mapped_column(String(40), comment="开仓成交 ID")
+    open_direction: Mapped[str] = mapped_column(String(8), nullable=False, comment="BUY / SELL")
+    open_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), comment="开仓价")
+    open_shares: Mapped[int | None] = mapped_column(Integer, comment="开仓股数")
+    open_fee: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), comment="开仓手续费")
+    open_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), comment="开仓时间")
+
+    target_close_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 4), comment="目标平仓价（低吸档为卖出价 / 高抛档为接回买入价）"
+    )
+
+    close_trade_id: Mapped[str | None] = mapped_column(String(40), comment="平仓成交 ID")
+    close_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), comment="平仓价")
+    close_shares: Mapped[int | None] = mapped_column(Integer, comment="平仓股数")
+    close_fee: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), comment="平仓手续费")
+    close_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), comment="平仓时间")
+
+    net_profit: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2), comment="闭环净利，未闭环必须为 NULL"
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

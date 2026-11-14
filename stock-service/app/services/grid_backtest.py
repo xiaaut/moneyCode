@@ -32,6 +32,22 @@ def _round(value: float, digits: int = 4) -> float:
     return round(value, digits)
 
 
+def order_fee(
+    amount: float,
+    side: str,
+    commission_rate: float,
+    min_commission: float,
+    stamp_duty_rate: float,
+) -> float:
+    """券商口径单笔费用：max(金额×佣金率, 最低佣金) + 卖出印花税。"""
+    value = max(0.0, float(amount or 0))
+    if value <= 0:
+        return 0.0
+    commission = max(value * commission_rate, max(0.0, min_commission))
+    stamp = value * stamp_duty_rate if side == "sell" else 0.0
+    return round(commission + stamp, 2)
+
+
 async def load_klines(code: str, start: date, end: date) -> list[dict[str, Any]]:
     """读取标的日 K（正序），返回 [{date, open, high, low, close}, ...]。"""
     async with AsyncSessionLocal() as session:
@@ -67,17 +83,39 @@ def run_backtest(klines: list[dict[str, Any]], params: dict[str, Any]) -> dict[s
     grid_amount = float(params.get("grid_amount", 10000))
     max_grids = int(params.get("max_grids", 10))
     commission_rate = float(params.get("commission_rate", 0.0001))
+    # 单笔最低佣金（ETF 常见 0.20 元）与卖出印花税（ETF 由调用方传 0）
+    min_commission = float(params.get("min_commission", 0.2))
+    stamp_duty_rate = float(params.get("stamp_duty_rate", 0.0))
 
+    # 正交组合：等比→复利百分比；等差→单利百分比（固定价差）或固定元数
+    grid_type = "arithmetic" if str(params.get("grid_type", "geometric")).lower() == "arithmetic" else "geometric"
+    raw_step_type = str(params.get("step_type", "percent")).lower()
+    step_type = "amount" if raw_step_type in ("amount", "fixed") else "percent"
     step = step_pct / 100.0
-    if base_price <= 0 or step <= 0 or max_grids <= 0:
+    step_amount = float(params.get("step_value") or 0)
+    if base_price <= 0 or max_grids <= 0:
         return _empty_result()
+    if grid_type == "geometric" and step <= 0:
+        return _empty_result()
+    if grid_type == "arithmetic":
+        delta = round(step_amount if step_type == "amount" else base_price * step, 3)
+        if delta <= 0:
+            return _empty_result()
 
     # 网格档位：买入线（向下）/ 卖出线（向上），对称配对
     levels: list[dict[str, Any]] = []
     for i in range(1, max_grids + 1):
-        buy_price = base_price * (1 - step) ** i
-        sell_price = base_price * (1 + step) ** i
-        levels.append({"level": i, "buy": buy_price, "sell": sell_price, "filled": False, "shares": 0})
+        if grid_type == "geometric":
+            buy_price = base_price * (1 - step) ** i
+            sell_price = base_price * (1 + step) ** i
+        else:
+            buy_price = base_price - i * delta
+            sell_price = base_price + i * delta
+        if buy_price <= 0:
+            continue
+        levels.append(
+            {"level": i, "buy": round(buy_price, 3), "sell": round(sell_price, 3), "filled": False, "shares": 0}
+        )
 
     cash = initial_cash
     shares = 0
@@ -101,7 +139,8 @@ def run_backtest(klines: list[dict[str, Any]], params: dict[str, Any]) -> dict[s
                 if n_shares < 100:
                     n_shares = 100
                 cost = n_shares * lv["buy"]
-                fee = cost * commission_rate
+                # 买入费按该档真实买入价计算，并受最低佣金兜底
+                fee = order_fee(cost, "buy", commission_rate, min_commission, stamp_duty_rate)
                 if cash >= cost + fee:
                     cash -= cost + fee
                     shares += n_shares
@@ -128,7 +167,7 @@ def run_backtest(klines: list[dict[str, Any]], params: dict[str, Any]) -> dict[s
             if high >= lv["sell"]:
                 n_shares = lv["shares"]
                 proceeds = n_shares * lv["sell"]
-                fee = proceeds * commission_rate
+                fee = order_fee(proceeds, "sell", commission_rate, min_commission, stamp_duty_rate)
                 realized = (lv["sell"] - lv["buy"]) * n_shares - float(lv.get("fee", 0)) - fee
                 cash += proceeds - fee
                 shares -= n_shares
@@ -165,7 +204,9 @@ def run_backtest(klines: list[dict[str, Any]], params: dict[str, Any]) -> dict[s
     if klines:
         first_close = klines[0]["close"]
         bench_shares = int(initial_cash / first_close / 100) * 100
-        bench_fee = bench_shares * first_close * commission_rate
+        bench_fee = order_fee(
+            bench_shares * first_close, "buy", commission_rate, min_commission, stamp_duty_rate
+        )
         bench_cash = initial_cash - bench_shares * first_close - bench_fee
         for k in klines:
             mv = bench_shares * k["close"]
