@@ -31,7 +31,6 @@ const form = reactive({
   basePrice: 0,
   upperPrice: 0,
   lowerPrice: 0,
-  genMode: 'step',
   mode: 'geometric',
   gridCount: 10,
   stepType: 'percent',
@@ -148,7 +147,8 @@ const effectivePrice = computed(() => {
 
 const plan = computed(() =>
   buildGridPlan({
-    genMode: form.genMode,
+    // 固定「按基准价步长」：区间等分已下线
+    genMode: 'step',
     stepType: form.stepType,
     stepValue: num(form.stepInput),
     gridsUp: num(form.gridsUp),
@@ -173,9 +173,9 @@ const summary = computed(() => (plan.value.ok ? plan.value.summary : null));
 
 // 步长模式：上下限由档位自动推算并实时回填（输入框禁用，仅作展示）
 watch(
-  () => [plan.value.config?.lowerPrice, plan.value.config?.upperPrice, form.genMode],
+  () => [plan.value.config?.lowerPrice, plan.value.config?.upperPrice],
   () => {
-    if (form.genMode !== 'step' || !plan.value.ok) return;
+    if (!plan.value.ok) return;
     const cfg = plan.value.config;
     if (num(cfg.lowerPrice) > 0) form.lowerPrice = num(cfg.lowerPrice);
     if (num(cfg.upperPrice) > 0) form.upperPrice = num(cfg.upperPrice);
@@ -295,7 +295,6 @@ const toBasePct = computed(() => {
 
 // 底仓分配提示：向上格数 × 每格股数 与初始建仓股数不一致时给出温和建议
 const baseAllocationHint = computed(() => {
-  if (form.genMode !== 'step') return null;
   const per = Math.round(num(form.sharesPerGrid));
   const init = Math.round(num(form.initialShares));
   if (!(per > 0) || !(init > 0)) return null;
@@ -314,6 +313,58 @@ const baseAllocationHint = computed(() => {
         ? `当前上方 ${up} 格共分配 ${allocated.toLocaleString('zh-CN')} 股底仓（剩余 ${diff.toLocaleString('zh-CN')} 股未挂网，可将向上卖出格数设为 ${suggest} 格以全部分配）`
         : `当前上方 ${up} 格需 ${allocated.toLocaleString('zh-CN')} 股底仓（已超出 ${diff.toLocaleString('zh-CN')} 股，可减少向上卖出格数至 ${suggest} 格）`,
   };
+});
+
+/* ---- 八宫格参数区：高级区间开关 / 步长换算 / 费率摘要 / 条件单速查 ---- */
+
+// 档位实际覆盖的上下限（step 由格数推算，range 取手填值）
+const planUpper = computed(() =>
+  plan.value.ok ? num(plan.value.config.upperPrice) : num(form.upperPrice),
+);
+const planLower = computed(() =>
+  plan.value.ok ? num(plan.value.config.lowerPrice) : num(form.lowerPrice),
+);
+
+// 单格步长的双向换算提示
+const stepGapText = computed(() => {
+  const base = num(form.basePrice);
+  const value = num(form.stepInput);
+  if (!(base > 0) || !(value > 0)) return '';
+  return form.mode === 'geometric'
+    ? `≈ ¥${((base * value) / 100).toFixed(3)}/格`
+    : `≈ ${((value / base) * 100).toFixed(2)}%/格`;
+});
+
+// 费率胶囊摘要（computed 在 script 里必须取 .value）
+const feeSummary = computed(() => {
+  const minFee = num(form.minCommission);
+  const commission = `佣金万${round2(num(commissionWan.value)).toFixed(1)}${
+    minFee > 0 ? `（最低¥${minFee.toFixed(2)}）` : '（免五）'
+  }`;
+  const stamp = isEtf.value ? 'ETF免印花税' : `印花税万${round2(num(stampWan.value)).toFixed(1)}`;
+  return `费率：${commission} · ${stamp}`;
+});
+
+// 一键配平：向上卖出格数 = 初始底仓可覆盖格数
+function balanceUpGrids() {
+  const hint = baseAllocationHint.value;
+  if (!hint) return;
+  form.gridsUp = hint.suggest;
+}
+
+// 同花顺条件单填单速查
+const thsQuickRef = computed(() => {
+  const base = num(form.basePrice);
+  const step = num(form.stepInput);
+  const ratio =
+    form.mode === 'geometric'
+      ? `按比例：上涨 ${step.toFixed(2)}% 卖出 / 下跌 ${step.toFixed(2)}% 买入`
+      : `按差价：上涨 ¥${step.toFixed(3)} 卖出 / 下跌 ¥${step.toFixed(3)} 买入`;
+  return `📋 同花顺条件单速查 ➔ 价格区间：${fmtPrice(planLower.value)} ~ ${fmtPrice(
+    planUpper.value,
+  )} 元 | 初始基准价：${fmtPrice(base)} 元 | ${ratio} | 每笔委托：${Math.round(
+    num(form.sharesPerGrid),
+  )} 股`;
 });
 
 /* ---- 档位持仓状态：底仓覆盖 + 成交滚动，标尺与表格共用同一份数据 ---- */
@@ -613,7 +664,6 @@ function applyStrategy(item) {
     basePrice: num(item.basePrice),
     upperPrice: num(item.upperPrice),
     lowerPrice: num(item.lowerPrice),
-    genMode: item.genMode === 'step' ? 'step' : 'range',
     mode: item.mode === 'geometric' ? 'geometric' : 'arithmetic',
     gridCount: Math.max(1, Math.round(num(item.gridCount)) || 10),
     stepType,
@@ -653,7 +703,6 @@ function startNewStrategy() {
     basePrice: 0,
     upperPrice: 0,
     lowerPrice: 0,
-    genMode: 'step',
     mode: 'geometric',
     gridCount: 10,
     stepType: 'percent',
@@ -714,7 +763,7 @@ async function saveStrategy(silent = false) {
     basePrice: num(form.basePrice),
     upperPrice: num(form.upperPrice),
     lowerPrice: num(form.lowerPrice),
-    genMode: form.genMode,
+    genMode: 'step',
     mode: form.mode,
     gridCount: Math.round(num(form.gridCount)),
     stepType: form.stepType,
@@ -873,7 +922,6 @@ function handlePortfolioImport(code) {
   const prevType = form.stepType;
   const prevStep = num(form.stepInput);
   const importBase = num(form.basePrice);
-  form.genMode = 'step';
   form.mode = 'geometric';
   form.stepType = 'percent';
   if (prevType === 'amount' && importBase > 0 && prevStep > 0) {
@@ -1266,148 +1314,119 @@ onMounted(loadStrategies);
       </div>
     </section>
 
-    <!-- 参数配置 -->
+    <!-- 参数配置（2 行 × 4 列八宫格） -->
     <el-card shadow="never" class="panel">
       <template #header>
         <div class="panel-header">
           <div class="panel-header-left">
             <span>策略参数</span>
             <span v-if="currentStrategy" class="panel-tag">已保存 · {{ currentStrategy.symbol }}</span>
+            <el-select
+              v-model="importCode"
+              class="import-select"
+              placeholder="从现有持仓导入"
+              size="small"
+              clearable
+              @change="handlePortfolioImport"
+            >
+              <el-option
+                v-for="row in portfolio"
+                :key="row.code"
+                :label="`${row.name || row.code}（${row.code}）`"
+                :value="row.code"
+              />
+            </el-select>
+            <!-- 仅新建策略（未选中已保存）时展示轻量代码/名称 -->
+            <template v-if="!selectedId">
+              <el-input v-model="form.symbol" class="head-symbol-input" maxlength="6" placeholder="代码" @blur="handleSymbolBlur" />
+              <el-input v-model="form.name" class="head-name-input" placeholder="名称（自动填充）" />
+            </template>
           </div>
-          <el-button class="backtest-trigger" size="small" type="warning" plain @click="openBacktest">
-            📊 历史回测验证
-          </el-button>
+
+          <div class="panel-header-right">
+            <el-popover placement="bottom-end" :width="272" trigger="click">
+              <template #reference>
+                <button class="fee-chip" type="button">
+                  {{ feeSummary }}
+                  <span class="fee-chip-action">⚙️ 费率设置</span>
+                </button>
+              </template>
+              <div class="fee-popover">
+                <label class="fee-row">
+                  <span>佣金（万分之）</span>
+                  <el-input-number v-model="commissionWan" :min="0" :max="100" :precision="2" :step="0.1" size="small" />
+                </label>
+                <label class="fee-row">
+                  <span>单笔最低佣金（元）</span>
+                  <el-input-number v-model="form.minCommission" :min="0" :max="100" :precision="2" :step="0.1" size="small" />
+                </label>
+                <label class="fee-row">
+                  <span>印花税（万分之，卖出）</span>
+                  <el-input-number
+                    v-model="stampWan"
+                    :min="0"
+                    :max="100"
+                    :precision="2"
+                    :step="1"
+                    :disabled="isEtf"
+                    size="small"
+                  />
+                </label>
+                <p v-if="isEtf" class="fee-note">ETF 免征印花税，已自动置 0 并锁定</p>
+                <p v-else class="fee-note">A 股卖出印花税默认万 5；最低佣金可填 0（免五）</p>
+              </div>
+            </el-popover>
+
+            <el-button class="backtest-trigger" size="small" type="warning" plain @click="openBacktest">
+              📊 历史回测验证
+            </el-button>
+          </div>
         </div>
       </template>
 
-      <div class="form-grid">
+      <!-- 第一行：定网格形状 -->
+      <div class="form-grid param-grid">
         <div class="field">
-          <label>股票代码</label>
-          <el-input v-model="form.symbol" maxlength="6" placeholder="600519" @blur="handleSymbolBlur" />
-        </div>
-        <div class="field">
-          <label>股票名称</label>
-          <el-input v-model="form.name" placeholder="输入代码后自动填充" />
-        </div>
-        <div class="field">
-          <label>最新现价</label>
-          <el-input :model-value="fmtPrice(effectivePrice)" readonly />
-        </div>
-        <div class="field">
-          <label>从现有持仓导入</label>
-          <el-select v-model="importCode" placeholder="选择持仓标的" clearable @change="handlePortfolioImport">
-            <el-option
-              v-for="row in portfolio"
-              :key="row.code"
-              :label="`${row.name || row.code}（${row.code}）`"
-              :value="row.code"
-            />
-          </el-select>
+          <div class="field-head">
+            <label>初始基准价（元）</label>
+            <el-button link type="primary" size="small" @click="setBasePriceToLatest">
+              用现价{{ num(effectivePrice) > 0 ? ` ${fmtPrice(effectivePrice)}` : '' }}
+            </el-button>
+          </div>
+          <el-input-number v-model="form.basePrice" :min="0" :precision="3" :step="0.01" controls-position="right" />
         </div>
 
         <div class="field">
-          <div class="field-head">
-            <label>价格上限（元）</label>
-            <span v-if="form.genMode === 'step'" class="auto-tag">自动推算</span>
-          </div>
-          <el-input-number
-            v-model="form.upperPrice"
-            :min="0"
-            :precision="3"
-            :step="0.1"
-            :disabled="form.genMode === 'step'"
-            controls-position="right"
-          />
-        </div>
-        <div class="field">
-          <div class="field-head">
-            <label>价格下限（元）</label>
-            <span v-if="form.genMode === 'step'" class="auto-tag">自动推算</span>
-          </div>
-          <el-input-number
-            v-model="form.lowerPrice"
-            :min="0"
-            :precision="3"
-            :step="0.1"
-            :disabled="form.genMode === 'step'"
-            controls-position="right"
-          />
-        </div>
-        <div class="field">
-          <div class="field-head">
-            <label>基准价（元）</label>
-            <el-button link type="primary" size="small" @click="setBasePriceToLatest">用现价</el-button>
-          </div>
-          <el-input-number v-model="form.basePrice" :min="0" :precision="2" :step="0.1" controls-position="right" />
-        </div>
-        <div class="field">
-          <label>网格生成方式</label>
-          <el-radio-group v-model="form.genMode">
-            <el-radio-button value="range">按区间等分</el-radio-button>
-            <el-radio-button value="step">按基准价步长</el-radio-button>
-          </el-radio-group>
-        </div>
-
-        <div class="field">
-          <label>网格模式</label>
+          <label>涨跌类型（网格模式）</label>
           <el-radio-group v-model="form.mode">
-            <el-radio-button value="arithmetic">等差网格</el-radio-button>
-            <el-radio-button value="geometric">等比网格</el-radio-button>
+            <el-radio-button value="geometric">按比例 (等比%)</el-radio-button>
+            <el-radio-button value="arithmetic">按差价 (等差元)</el-radio-button>
           </el-radio-group>
         </div>
 
-        <div v-if="form.genMode === 'range'" class="field">
-          <label>网格数量（格）</label>
-          <el-input-number v-model="form.gridCount" :min="1" :max="200" :step="1" step-strictly controls-position="right" />
+        <div class="field">
+          <label>
+            {{ form.mode === 'geometric' ? '单格步长 (%)' : '单格差价 (元)' }}
+            <span class="gap-hint">{{ stepGapText }}</span>
+          </label>
+          <el-input-number
+            v-model="form.stepInput"
+            :min="0"
+            :precision="form.mode === 'geometric' ? 2 : 3"
+            :step="form.mode === 'geometric' ? 0.1 : 0.005"
+            controls-position="right"
+          />
         </div>
-
-        <template v-if="form.genMode === 'step'">
-          <div class="field">
-            <label>{{ form.mode === 'geometric' ? '网格步长 (%)' : '网格步长 (元)' }}</label>
-            <el-input-number
-              v-model="form.stepInput"
-              :min="0"
-              :precision="form.mode === 'geometric' ? 2 : 3"
-              :step="form.mode === 'geometric' ? 0.1 : 0.005"
-              controls-position="right"
-            />
-          </div>
-          <div class="field">
-            <label>向上卖出格数</label>
-            <el-input-number v-model="form.gridsUp" :min="0" :max="200" :step="1" step-strictly controls-position="right" />
-          </div>
-          <div class="field">
-            <label>向下买入格数</label>
-            <el-input-number v-model="form.gridsDown" :min="0" :max="200" :step="1" step-strictly controls-position="right" />
-          </div>
-        </template>
 
         <div class="field">
           <label>每格委托股数（股）</label>
           <el-input-number v-model="form.sharesPerGrid" :min="100" :step="100" step-strictly controls-position="right" />
         </div>
+
+        <!-- 第二行：定底仓与格数 -->
         <div class="field">
-          <label>佣金（万分之）</label>
-          <el-input-number v-model="commissionWan" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" />
-        </div>
-        <div class="field">
-          <label>单笔最低佣金（元）</label>
-          <el-input-number v-model="form.minCommission" :min="0" :max="100" :precision="2" :step="0.1" controls-position="right" />
-        </div>
-        <div class="field">
-          <div class="field-head">
-            <label>印花税（万分之，卖出）</label>
-            <span v-if="isEtf" class="lock-tag">ETF 免征</span>
-          </div>
-          <el-input-number
-            v-model="stampWan"
-            :min="0"
-            :max="100"
-            :precision="2"
-            :step="1"
-            :disabled="isEtf"
-            controls-position="right"
-          />
+          <label>初始建仓股数（股）</label>
+          <el-input-number v-model="form.initialShares" :min="0" :step="100" step-strictly controls-position="right" />
         </div>
 
         <div class="field">
@@ -1421,23 +1440,38 @@ onMounted(loadStrategies);
             controls-position="right"
           />
         </div>
+
         <div class="field">
-          <label>初始建仓股数（股）</label>
-          <el-input-number v-model="form.initialShares" :min="0" :step="100" step-strictly controls-position="right" />
-          <div v-if="baseAllocationHint" :class="['field-hint', baseAllocationHint.over ? 'field-hint-warn' : '']">
-            💡 {{ baseAllocationHint.text }}
+          <div class="field-head">
+            <label>
+              向上卖出格数
+              <span class="bound-hint">（上限 ¥{{ fmtPrice(planUpper) }}）</span>
+            </label>
+            <el-button v-if="baseAllocationHint" link type="primary" size="small" @click="balanceUpGrids">
+              ⚡ 配平底仓：设为 {{ baseAllocationHint.suggest }} 格
+            </el-button>
           </div>
+          <el-input-number v-model="form.gridsUp" :min="0" :max="200" :step="1" step-strictly controls-position="right" />
+        </div>
+
+        <div class="field">
+          <label>
+            向下买入格数
+            <span class="bound-hint">（下限 ¥{{ fmtPrice(planLower) }}）</span>
+          </label>
+          <el-input-number v-model="form.gridsDown" :min="0" :max="200" :step="1" step-strictly controls-position="right" />
         </div>
       </div>
 
       <div class="form-actions">
         <el-button type="primary" :icon="TrendCharts" @click="handlePreview">计算档位与预览</el-button>
         <el-button type="success" :loading="saving" @click="saveStrategy()">保存策略</el-button>
-        <span v-if="isFormEmpty" class="plan-hint muted-hint">填写标的与价格区间后自动生成档位预览</span>
+        <span v-if="isFormEmpty" class="plan-hint muted-hint">选择标的或导入持仓后自动生成档位预览</span>
         <span v-else-if="planError" class="plan-hint error">{{ planError }}</span>
         <span v-else class="plan-hint">
           {{ levels.length }} 档 · 最大占用资金 {{ fmtMoney(maxTotalCapital) }} 元
         </span>
+        <div v-if="!isFormEmpty && !planError" class="ths-quickref">{{ thsQuickRef }}</div>
       </div>
     </el-card>
 
@@ -1629,7 +1663,7 @@ onMounted(loadStrategies);
       </div>
       <el-empty
         v-else
-        :description="form.genMode === 'step' ? '填写基准价与步长后展示价格标尺' : '填写上下限后展示价格标尺'"
+        :description="'填写基准价与步长后展示价格标尺'"
         :image-size="72"
       />
     </el-card>
@@ -2747,6 +2781,130 @@ onMounted(loadStrategies);
 @media (max-width: 900px) {
   .backtest-cards {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+/* ===== 八宫格参数区 ===== */
+
+.panel-header {
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.panel-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.import-select {
+  width: 190px;
+}
+
+.import-select :deep(.el-select__wrapper) {
+  min-height: 30px;
+  font-size: 0.82rem;
+}
+
+.head-symbol-input {
+  width: 96px;
+}
+
+.head-name-input {
+  width: 150px;
+}
+
+.head-symbol-input :deep(.el-input__wrapper),
+.head-name-input :deep(.el-input__wrapper) {
+  min-height: 30px;
+  font-size: 0.82rem;
+}
+
+.fee-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid #dfe8f2;
+  border-radius: 999px;
+  background: #f7fafd;
+  color: #5a738c;
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fee-chip:hover {
+  border-color: #9cc2f0;
+  background: #eef6ff;
+  color: #1f5fbf;
+}
+
+.fee-chip-action {
+  color: #1f5fbf;
+  font-weight: 600;
+}
+
+.fee-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fee-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: #4a6076;
+}
+
+.fee-row :deep(.el-input-number) {
+  width: 100%;
+}
+
+.fee-note {
+  margin: 2px 0 0;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: #8a9db0;
+}
+
+.form-grid.param-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.gap-hint {
+  margin-left: 4px;
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: #9aaec2;
+  white-space: nowrap;
+}
+
+.bound-hint {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #1f5fbf;
+  white-space: nowrap;
+}
+
+.ths-quickref {
+  flex-basis: 100%;
+  padding: 7px 12px;
+  border: 1px solid #e2ecf7;
+  border-radius: 8px;
+  background: #f4f8fd;
+  color: #4a6076;
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 1180px) {
+  .form-grid.param-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>
