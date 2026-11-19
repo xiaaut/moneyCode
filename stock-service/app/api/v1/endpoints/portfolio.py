@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +35,7 @@ from app.schemas.portfolio import (
     ClosedPositionCreate,
     PositionIn,
     PositionOut,
+    PositionPatch,
     TradeHistoryIn,
     TradeHistoryOut,
     WatchlistItemIn,
@@ -82,6 +83,8 @@ def _position_to_out(position: Position, total_market_value: float) -> PositionO
         profit_amount=profit_amount,
         profit_ratio=f"{profit_ratio:.2f}%",
         position_ratio=f"{position_ratio:.2f}%",
+        realized_profit=round(float(position.realized_profit or 0), 2),
+        dividend_amount=round(float(position.dividend_amount or 0), 2),
         pb=_float_or_none(extra.get("pb")),
         pe=_float_or_none(extra.get("pe")),
         roe=fmt_pct(extra.get("roe")) if extra.get("roe") is not None else DASH,
@@ -101,6 +104,31 @@ def _position_to_out(position: Position, total_market_value: float) -> PositionO
 def _float_or_none(value: Any) -> float | None:
     number = parse_number(value)
     return round(float(number), 2) if number is not None else None
+
+
+# 「已落袋」两列：COALESCE 写入 —— 前端未带字段（None）时保留库中原值，显式 0 才清零。
+_LANDED_COLUMNS = ("realized_profit", "dividend_amount")
+
+
+def _conflict_set_map(
+    statement: Any, table: Any, *, touch_updated_at: bool = False
+) -> dict[str, Any]:
+    """构造 ON CONFLICT DO UPDATE 的 set_ 映射（不含 id/code/created_at/updated_at）。"""
+    names = [
+        c.name for c in table.columns if c.name not in {"id", "code", "created_at", "updated_at"}
+    ]
+    set_map: dict[str, Any] = {
+        name: (
+            func.coalesce(statement.excluded[name], table.c[name])
+            if name in _LANDED_COLUMNS
+            else statement.excluded[name]
+        )
+        for name in names
+    }
+    if touch_updated_at:
+        # 用户主动「新增/修改持仓」：显式刷新 updated_at（隔离铁律的另一半）
+        set_map["updated_at"] = func.now()
+    return set_map
 
 
 def _position_row(payload: PositionIn) -> dict[str, Any]:
@@ -126,6 +154,9 @@ def _position_row(payload: PositionIn) -> dict[str, Any]:
         "profit_ratio": (
             Decimal(str(round(profit_amount / total_cost * 100, 4))) if total_cost > 0 else None
         ),
+        # None 表示前端未提供 → upsert 时用 COALESCE 保留库中原值（不被整数组覆盖清零）
+        "realized_profit": _decimal(payload.realized_profit),
+        "dividend_amount": _decimal(payload.dividend_amount),
         "extra": {
             "pb": _float_or_none(payload.pb),
             "pe": _float_or_none(payload.pe),
@@ -228,9 +259,30 @@ async def list_positions(db: AsyncSession = Depends(get_db)) -> list[PositionOut
 
 @router.post("/portfolio", response_model=OkResponse, summary="整数组覆盖持仓")
 async def replace_positions(
-    payload: list[PositionIn], db: AsyncSession = Depends(get_db)
+    payload: list[PositionIn],
+    force: bool = Query(False, description="跳过防误删熔断（确认要批量清理时传 true）"),
+    db: AsyncSession = Depends(get_db),
 ) -> OkResponse:
-    """前端 Positions.vue 每次保存都提交完整数组，这里按 code 覆盖并删除多余行。"""
+    """前端 Positions.vue 的「整表保存」入口：按 code 覆盖并删除未提交的行。
+
+    ⚠️ 全量覆盖语义（`DELETE WHERE code NOT IN (...)`），误传局部数组会删掉其他持仓。
+    为此加熔断：库存 >3 条且本次 <=1 条、或比库存骤减超过 50%，直接 400 拒绝，
+    提示改用 `PATCH /api/portfolio/{code}`。确认要批量清理时加 `?force=true`。
+    """
+    existing = int(await db.scalar(select(func.count()).select_from(Position)) or 0)
+    submitted = len(payload)
+    shrunk_too_much = submitted < existing * 0.5
+    if not force and existing > 3 and (submitted <= 1 or shrunk_too_much):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"拒绝执行：库内现有 {existing} 条持仓，本次仅提交 {submitted} 条"
+                f"（全量覆盖会删除未提交的 {existing - submitted} 条）。"
+                "单只股票修改请改用 PATCH /api/portfolio/{code}；"
+                "确需批量清理请加 ?force=true 重试。"
+            ),
+        )
+
     merged: dict[str, dict[str, Any]] = {}
     for item in payload:
         try:
@@ -253,12 +305,9 @@ async def replace_positions(
     statement = pg_insert(table).values(rows)
     # 整数组覆盖仅同步行情/衍生字段，严禁刷新 updated_at（隔离铁律：
     # 前端「刷新现价/ROE」走此接口回写，绝不能污染「最近整理时间」）。
-    updatable = [
-        c.name for c in table.columns if c.name not in {"id", "code", "created_at", "updated_at"}
-    ]
     statement = statement.on_conflict_do_update(
         index_elements=["code"],
-        set_={name: statement.excluded[name] for name in updatable},
+        set_=_conflict_set_map(statement, table),
     )
     await db.execute(statement)
     await db.commit()
@@ -283,12 +332,9 @@ async def upsert_position(
     table = Position.__table__
     statement = pg_insert(table).values(row)
     # 用户主动「新增/修改持仓」：显式刷新 updated_at 为当前时间（隔离铁律的另一半）
-    updatable = [
-        c.name for c in table.columns if c.name not in {"id", "code", "created_at", "updated_at"}
-    ]
     statement = statement.on_conflict_do_update(
         index_elements=["code"],
-        set_={name: statement.excluded[name] for name in updatable} | {"updated_at": func.now()},
+        set_=_conflict_set_map(statement, table, touch_updated_at=True),
     )
     await db.execute(statement)
     await db.commit()
@@ -311,6 +357,109 @@ async def update_position(
 ) -> PositionOut:
     payload.code = code
     return await upsert_position(payload, db)
+
+
+# PATCH 只认 ORM 字段名 → extra(jsonb) 内键名的映射
+_EXTRA_FIELDS: dict[str, str] = {
+    "pb": "pb",
+    "pe": "pe",
+    "roe": "roe",
+    "avg_pe": "avg_pe",
+    "eps": "eps",
+    "eps3y": "eps_3y",
+    "g": "g",
+    "peg": "peg",
+    "expected_return": "expected_return",
+}
+
+
+@router.patch(
+    "/portfolio/{code}", response_model=PositionOut,
+    summary="按代码局部更新持仓（只改单行，永不删除）",
+)
+async def patch_position(
+    code: str, payload: PositionPatch, db: AsyncSession = Depends(get_db)
+) -> PositionOut:
+    """精准更新单只持仓的「本次提交」字段，未提交字段保持原值。
+
+    与 `POST /api/portfolio`（全量覆盖 + DELETE 未提交行）彻底解耦：
+    这里只有 `UPDATE positions WHERE code = :code`，不可能波及其他持仓。
+    改完自动重算该行市值/盈亏/盈亏率，并刷新全表仓位占比（派生快照，不动别人 updated_at）。
+    """
+    pure = "".join(ch for ch in str(code) if ch.isdigit())[-6:]
+    if len(pure) != 6:
+        raise HTTPException(status_code=400, detail="无效的股票代码")
+
+    position = await db.scalar(select(Position).where(Position.code == pure))
+    if position is None:
+        raise HTTPException(
+            status_code=404, detail=f"持仓不存在：{pure}（本接口只更新，不会新增或删除）"
+        )
+
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="未提交任何可更新字段")
+
+    if isinstance(data.get("name"), str) and data["name"].strip():
+        position.name = data["name"].strip()
+    if "sector" in data:
+        position.sector = clean_industry_or_none(data["sector"])
+    if data.get("quantity") is not None:
+        position.shares = int(_float(data["quantity"]))
+    for field in ("cost_price", "current_price"):
+        if data.get(field) is not None:
+            value = _decimal(data[field])
+            if value is not None:
+                setattr(position, field, value)
+    # 已落袋两列：显式传 0 即清零，传 '-'/空视为未修改
+    for field in _LANDED_COLUMNS:
+        if data.get(field) is not None:
+            value = _decimal(data[field])
+            if value is not None:
+                setattr(position, field, value)
+
+    extra_keys = [f for f in _EXTRA_FIELDS if f in data]
+    if extra_keys:
+        extra = dict(position.extra or {})
+        for field in extra_keys:
+            extra[_EXTRA_FIELDS[field]] = _float_or_none(data[field])
+        position.extra = extra
+
+    # 该行快照重算（口径与 _position_to_out / daily_sync 完全一致）
+    quantity = int(position.shares or 0)
+    cost_price = float(position.cost_price or 0)
+    current_price = float(position.current_price or 0)
+    total_cost = cost_price * quantity
+    market_value = current_price * quantity
+    profit_amount = market_value - total_cost
+    position.market_value = Decimal(str(round(market_value, 2)))
+    position.profit_amount = Decimal(str(round(profit_amount, 2)))
+    position.profit_ratio = (
+        Decimal(str(round(profit_amount / total_cost * 100, 4))) if total_cost > 0 else None
+    )
+    # 用户主动修改 → 刷新「最近整理时间」（后台刷新现价不走这里）
+    position.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    total = float(
+        await db.scalar(
+            select(func.coalesce(func.sum(Position.shares * Position.current_price), 0))
+        )
+        or 0
+    )
+    # 仓位占比是全表派生值：批量重算，但不触碰其他行的 updated_at
+    await db.execute(
+        update(Position)
+        .values(
+            position_ratio=func.round(
+                (Position.shares * Position.current_price) * 100 / func.nullif(total, 0), 4
+            )
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    await db.refresh(position)
+    return _position_to_out(position, total)
 
 
 # --------------------------------------------------------------------------- #

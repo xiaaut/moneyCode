@@ -32,6 +32,10 @@ class PositionOut(CamelModel):
     profit_ratio: str = "0.00%"
     position_ratio: str = "0.00%"
 
+    # 已落袋（做T已实现盈亏 + 累计现金分红），前端据此渲染主行下方的「实际持仓还原」附属行
+    realized_profit: float = 0.0
+    dividend_amount: float = 0.0
+
     pb: float | None = None
     pe: float | None = None
     roe: str = DASH
@@ -59,6 +63,10 @@ class PositionIn(CamelModel):
     quantity: int | float | str | None = 0
     current_price: float | str | None = 0
 
+    # None = 未提供（保留库中原值），0 = 显式清零；整数组覆盖不带这两个字段时不会被清空
+    realized_profit: float | str | None = None
+    dividend_amount: float | str | None = None
+
     pb: float | str | None = None
     pe: float | str | None = None
     roe: float | str | None = None
@@ -75,6 +83,35 @@ class PositionIn(CamelModel):
         code = str(value or "").strip()
         digits = "".join(ch for ch in code if ch.isdigit())
         return digits[-6:] if len(digits) >= 6 else code
+
+
+class PositionPatch(CamelModel):
+    """PATCH /api/portfolio/{code} 局部更新入参。
+
+    全部字段默认 None = 「本次未提交」，对应列保持库中原值不动；
+    只有显式提交的键才会写入（配合 `model_dump(exclude_unset=True)`）。
+    该接口不含任何 DELETE 逻辑，永远只影响单行。
+    """
+
+    name: str | None = None
+    sector: str | None = None
+
+    cost_price: float | str | None = None
+    quantity: int | float | str | None = None
+    current_price: float | str | None = None
+
+    realized_profit: float | str | None = None
+    dividend_amount: float | str | None = None
+
+    pb: float | str | None = None
+    pe: float | str | None = None
+    roe: float | str | None = None
+    avg_pe: float | str | None = None
+    eps: float | str | None = None
+    eps3y: float | str | None = Field(default=None, alias="eps3y")
+    g: float | str | None = None
+    peg: float | str | None = None
+    expected_return: float | str | None = None
 
 
 class WatchlistItemOut(CamelModel):
@@ -195,6 +232,7 @@ class ClosedPositionCreate(CamelModel):
 __all__ = [
     "PositionOut",
     "PositionIn",
+    "PositionPatch",
     "WatchlistItemOut",
     "WatchlistItemIn",
     "TradeHistoryOut",

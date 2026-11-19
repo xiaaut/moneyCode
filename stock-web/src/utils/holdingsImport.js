@@ -201,6 +201,8 @@ export function mergeHoldings(parsedRows, existing) {
       profitAmount: 0,
       profitRatio: '0.00%',
       positionRatio: '0.00%',
+      realizedProfit: 0,
+      dividendAmount: 0,
       pb: '-',
       pe: '-',
       roe: '-',

@@ -36,3 +36,6 @@ A 股个人投研系统（my-finance-system），Monorepo 双端：
 - `positions.updated_at` 隔离铁律：仅用户主动新增/修改持仓才刷新；后台「刷新现价/收盘更新」严禁触碰（模型已去 onupdate，整数组覆盖不刷）。
 - 同花顺三表字段严重不足（资产负债表仅 7 字段），张氏财报分析实际走东财 F10 完整字段自动降级补全。
 - Vue3 `<script setup>` 与 options API 混用会导致 this 访问不到 setup 变量，须全部移到 script setup。
+- **`POST /api/portfolio` 是全量覆盖**（会删掉未提交的 code，已加 400 熔断：库存>3 且提交≤1 或骤减>50%）。测写入/改单只股票只能用 `PATCH /api/portfolio/{code}`；万一手滑，`db_sync.py status` 查 NAS 冷备，按表回灌本地。
+- el-table 不支持「主行下方额外 tr」：只能 DOM 托管（nextTick + MutationObserver + 按代码文本回查行），`type="expand"` 会多一列破坏 14 列布局。
+- 本机验证前端可用「临时 vite 端口 + 无头 Chrome CDP（`--remote-debugging-port` + Node 全局 WebSocket）」，比装 playwright 轻；注意别碰用户 3000/8000。

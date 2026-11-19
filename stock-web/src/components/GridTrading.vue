@@ -537,23 +537,22 @@ const priceDivider = computed(() => {
   };
 });
 
-// 从高到低排列，并在现价所在相邻两档之间插入分割提示行
+// 从高到低排列，横幅严格落在「已持仓·待卖出」与「待买入」的分界处
+// 有效触发价：已持仓取卖出触发价（sellPrice），待买入取买入触发价（buyPrice）
+// —— 这样持有档即使 buyPrice < 现价 < sellPrice，也不会被压到横幅下方
 const levelRows = computed(() => {
   const ordered = [...levels.value].sort((a, b) => b.buyPrice - a.buyPrice);
-  const price = effectivePrice.value;
   const divider = priceDivider.value;
-  const rows = [];
-  let placed = false;
+  const holdingRows = [];
+  const idleRows = [];
   for (const level of ordered) {
-    if (!placed && divider && price > 0 && price >= level.buyPrice) {
-      rows.push({ __divider: true, __key: 'divider', text: divider.text });
-      placed = true;
-    }
-    rows.push({ ...level, __key: `level-${level.index}` });
+    const row = { ...level, __key: `level-${level.index}` };
+    if (levelStatus(level).code === 'holding') holdingRows.push(row);
+    else idleRows.push(row);
   }
-  if (!placed && divider) {
-    rows.push({ __divider: true, __key: 'divider', text: divider.text });
-  }
+  const rows = [...holdingRows];
+  if (divider) rows.push({ __divider: true, __key: 'divider', text: divider.text });
+  rows.push(...idleRows);
   return rows;
 });
 
@@ -577,6 +576,14 @@ function levelRowClass({ row }) {
 }
 
 /* ---- 价格标尺（圆点状态与表格完全一致） ---- */
+
+// 标尺刻度精度：ETF 或含 3 位小数的价格显示 3 位，普通股票 2 位
+const priceDigits = computed(() => {
+  if (isEtf.value) return 3;
+  const candidates = [num(form.basePrice), num(form.stepInput), planUpper.value, planLower.value];
+  const need3 = candidates.some(value => value > 0 && Math.abs(value * 100 - Math.round(value * 100)) > 1e-6);
+  return need3 ? 3 : 2;
+});
 
 const ruler = computed(() => {
   // 步长模式的上下限由档位派生，优先用 plan 的实际区间
@@ -1621,8 +1628,8 @@ onMounted(loadStrategies);
             摊薄成本
           </text>
 
-          <text :x="ruler.left" :y="ruler.axisY + 26" text-anchor="start" class="ruler-label">下限 {{ ruler.lower.toFixed(2) }}</text>
-          <text :x="ruler.right" :y="ruler.axisY + 26" text-anchor="end" class="ruler-label">上限 {{ ruler.upper.toFixed(2) }}</text>
+          <text :x="ruler.left" :y="ruler.axisY + 26" text-anchor="start" class="ruler-label">下限 {{ ruler.lower.toFixed(priceDigits) }}</text>
+          <text :x="ruler.right" :y="ruler.axisY + 26" text-anchor="end" class="ruler-label">上限 {{ ruler.upper.toFixed(priceDigits) }}</text>
           <text
             v-if="ruler.showBaseLabel"
             :x="ruler.baseX"
@@ -1630,7 +1637,7 @@ onMounted(loadStrategies);
             text-anchor="middle"
             class="ruler-label base-label"
           >
-            基准 {{ num(form.basePrice).toFixed(2) }}
+            基准 {{ num(form.basePrice).toFixed(priceDigits) }}
           </text>
 
           <g v-if="ruler.priceX !== null">

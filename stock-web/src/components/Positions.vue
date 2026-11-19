@@ -1,5 +1,5 @@
 <script setup>
-import { computed, inject, onMounted, ref, watch } from 'vue';
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { mergeHoldings, parseHoldingsText } from '../utils/holdingsImport.js';
 import FundFlowSpark from './FundFlowSpark.vue';
@@ -8,6 +8,12 @@ import FundFlowDrawer from './FundFlowDrawer.vue';
 const PORTFOLIO_API = '/api/portfolio';
 const IMPORT_PLACEHOLDER =
   '证券代码\t证券名称\t股票余额\t成本价\t现价\n600519\t贵州茅台\t100\t1500.00\t1680.00';
+
+// 后端统一异常处理器把 detail 包成了 message，两者都兜一下
+function readApiError(payload, fallback) {
+  if (!payload || typeof payload !== 'object') return fallback;
+  return payload.message || payload.detail || fallback;
+}
 
 const defaultTableData = [
   {
@@ -156,6 +162,8 @@ const editForm = ref({
   name: '',
   costPrice: 0,
   quantity: 0,
+  realizedProfit: 0,
+  dividendAmount: 0,
   avgPe: '-',
   eps: '-',
   eps3y: '-',
@@ -234,8 +242,13 @@ function handleRiskTipMove(event) {
     return;
   }
 
-  const index = Array.prototype.indexOf.call(parent.children, tr);
-  const row = tableData.value[index];
+  // 只数主行（附属行不参与行序），保证与 tableData 一一对应
+  const mainRows = Array.prototype.filter.call(
+    parent.children,
+    el => el.nodeName === 'TR' && !el.classList.contains('actual-sub-row'),
+  );
+  const rowIndex = mainRows.indexOf(tr);
+  const row = tableData.value[rowIndex];
   const risk = row ? evaluateRisk(row) : null;
   if (!risk) {
     hideRiskTip();
@@ -247,8 +260,8 @@ function handleRiskTipMove(event) {
   if (x + RISK_TIP_WIDTH > window.innerWidth - 8) x = event.clientX - RISK_TIP_WIDTH - 14;
   if (y + RISK_TIP_HEIGHT > window.innerHeight - 8) y = event.clientY - RISK_TIP_HEIGHT - 14;
 
-  if (riskTipRowIndex !== index) {
-    riskTipRowIndex = index;
+  if (riskTipRowIndex !== rowIndex) {
+    riskTipRowIndex = rowIndex;
     riskTip.value = {
       visible: true,
       x,
@@ -268,6 +281,223 @@ const formatThreeDecimalCell = (_, __, value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num.toFixed(3) : value;
 };
+
+// ---------------------------------------------------------------------------
+// 已落袋（做T/分红）→ 主行下方「实际持仓还原」附属行
+//   已落袋       = realizedProfit + dividendAmount
+//   实际成本金额 = 主行成本金额 + 已落袋
+//   实际成本价   = 实际成本金额 / 持仓量
+//   当前实际获利 = 主行市值 - 实际成本金额
+//   当前实际盈亏% = 当前实际获利 / 实际成本金额 * 100
+// 主行与「汇总」行完全不参与本段计算，数据源仍是后端返回的摊薄成本/盈亏。
+// ---------------------------------------------------------------------------
+const ACTUAL_SUBROW_CLASS = 'actual-sub-row';
+const portfolioTableRef = ref(null);
+let actualSubRowObserver = null;
+let actualSubRowSyncing = false;
+
+const toFiniteNumber = value => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+};
+
+// 严格按「非零即展示」：NaN/空值一律按 0 处理，避免 Number('') === 0 的误判
+const hasActualAdjustment = row =>
+  toFiniteNumber(row?.realizedProfit) !== 0 || toFiniteNumber(row?.dividendAmount) !== 0;
+
+function formatSigned(value, digits, suffix = '') {
+  const rounded = Number(Number(value).toFixed(digits));
+  if (!Number.isFinite(rounded)) return '--';
+  const sign = rounded > 0 ? '+' : rounded < 0 ? '-' : '';
+  return `${sign}${Math.abs(rounded).toFixed(digits)}${suffix}`;
+}
+
+function buildActualSubRowCells(row) {
+  const quantity = toFiniteNumber(row?.quantity);
+  const totalCost = toFiniteNumber(row?.totalCost);
+  const marketValue = toFiniteNumber(row?.marketValue);
+  const landed = toFiniteNumber(row?.realizedProfit) + toFiniteNumber(row?.dividendAmount);
+  const actualCost = totalCost + landed;
+  const actualPrice = quantity > 0 ? actualCost / quantity : 0;
+  const actualProfit = marketValue - actualCost;
+  // 负数做T可能把实际成本压到 <= 0，此处必须兜底，否则会出现 NaN / Infinity
+  const ratioValid = actualCost > 0;
+  const actualRatio = ratioValid ? (actualProfit / actualCost) * 100 : 0;
+  const tone = actualProfit > 0 ? 'is-up' : actualProfit < 0 ? 'is-down' : '';
+  const ratioTone = ratioValid ? tone : 'is-muted';
+
+  // 与主表列顺序严格一一对应：序号/代码/名称/板块/成本价/持仓量/现价/成本金额/
+  // 市值/盈亏额/盈亏%/仓位%/5日主力/修改时间/操作（无关列留空）
+  return [
+    { align: 'center' },
+    { align: 'center' },
+    { align: 'center' },
+    { text: '↳ 实际持仓还原', align: 'center', className: 'is-muted' },
+    {
+      text: quantity > 0 ? `实际 ${actualPrice.toFixed(3)}` : '实际 --',
+      align: 'right',
+      className: 'is-strong',
+    },
+    { align: 'right' },
+    { align: 'right' },
+    { text: `实际 ${actualCost.toFixed(3)}`, align: 'right', className: 'is-strong' },
+    { align: 'right' },
+    {
+      align: 'right',
+      // 盈亏额列只有 ~112px，单行「已落袋 4347.51 | 当前获利 +308.49」放不下会被截断，
+      // 这里按 | 折成两行（仍是同一列、同一口径），保证两个数字都完整可见
+      lines: [
+        [{ text: `已落袋 ${landed.toFixed(2)} |` }],
+        [{ text: '当前获利 ' }, { text: formatSigned(actualProfit, 2), className: tone }],
+      ],
+    },
+    {
+      align: 'right',
+      segments: [
+        { text: '当前 ' },
+        { text: ratioValid ? formatSigned(actualRatio, 2, '%') : '--', className: ratioTone },
+      ],
+    },
+    { align: 'right' },
+    { align: 'center' },
+    { align: 'center' },
+    { align: 'center' },
+  ];
+}
+
+function buildActualSubRowElement(cells, signature, risk) {
+  const tr = document.createElement('tr');
+  tr.className = `${ACTUAL_SUBROW_CLASS}${risk ? ' actual-sub-row--risk' : ''}`;
+  tr.dataset.signature = signature;
+
+  cells.forEach(cell => {
+    const td = document.createElement('td');
+    const align = cell.align === 'right' ? 'c-right' : cell.align === 'center' ? 'c-center' : '';
+    td.className = ['el-table__cell', 'actual-sub-cell', align, cell.className || '']
+      .filter(Boolean)
+      .join(' ');
+    if (cell.lines) {
+      cell.lines.forEach(line => {
+        const lineEl = document.createElement('span');
+        lineEl.className = 'subrow-line';
+        line.forEach(segment => {
+          if (!segment.text) return;
+          const span = document.createElement('span');
+          span.textContent = segment.text;
+          if (segment.className) span.className = segment.className;
+          lineEl.appendChild(span);
+        });
+        td.appendChild(lineEl);
+      });
+    } else if (cell.segments) {
+      cell.segments.forEach(segment => {
+        if (!segment.text) return;
+        const span = document.createElement('span');
+        span.textContent = segment.text;
+        if (segment.className) span.className = segment.className;
+        td.appendChild(span);
+      });
+    } else if (cell.text) {
+      td.textContent = cell.text;
+    }
+    tr.appendChild(td);
+  });
+
+  return tr;
+}
+
+function getPortfolioTbody() {
+  const root = portfolioTableRef.value?.$el;
+  if (!root) return null;
+  return root.querySelector('.el-table__body-wrapper tbody');
+}
+
+/**
+ * 把附属行贴着主行插入（el-table 不支持额外行，只能托管到 DOM）。
+ * 行数据按「代码」回查，不依赖行序，因此排序 / 刷新现价 / 局部重渲染都不会错位。
+ */
+function syncActualSubRows() {
+  if (actualSubRowSyncing) return;
+  const tbody = getPortfolioTbody();
+  if (!tbody) return;
+
+  actualSubRowSyncing = true;
+  actualSubRowObserver?.disconnect();
+  try {
+    const rowByCode = new Map();
+    tableData.value.forEach(row => {
+      const code = String(row?.code ?? '').trim();
+      if (code) rowByCode.set(code, row);
+    });
+
+    const mainRows = Array.from(tbody.children).filter(
+      el => el.tagName === 'TR' && el.classList.contains('el-table__row'),
+    );
+
+    mainRows.forEach(tr => {
+      const code = String(tr.children[1]?.textContent ?? '').trim();
+      const row = rowByCode.get(code);
+      const next = tr.nextElementSibling;
+      const current = next && next.classList.contains(ACTUAL_SUBROW_CLASS) ? next : null;
+
+      if (!row || !hasActualAdjustment(row)) {
+        if (current) current.remove();
+        return;
+      }
+
+      const cells = buildActualSubRowCells(row);
+      const signature = JSON.stringify(cells);
+      if (current && current.dataset.signature === signature) return;
+      if (current) current.remove();
+      tr.after(buildActualSubRowElement(cells, signature, Boolean(evaluateRisk(row))));
+    });
+
+    // 清掉重排后落单的附属行（前一个兄弟节点不再是主行）
+    Array.from(tbody.querySelectorAll(`tr.${ACTUAL_SUBROW_CLASS}`)).forEach(tr => {
+      const prev = tr.previousElementSibling;
+      if (!prev || !prev.classList.contains('el-table__row')) tr.remove();
+    });
+  } finally {
+    actualSubRowSyncing = false;
+    if (!actualSubRowObserver) {
+      actualSubRowObserver = new MutationObserver(() => {
+        if (!actualSubRowSyncing) syncActualSubRows();
+      });
+    }
+    actualSubRowObserver.observe(tbody, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
+}
+
+const scheduleActualSubRows = () => {
+  void nextTick(syncActualSubRows);
+};
+
+// 影响附属行数值的字段变化 → 重算（排序/重渲染由 MutationObserver 兜底）
+const actualSubRowSignature = computed(() =>
+  tableData.value
+    .map(row =>
+      [
+        row?.code ?? '',
+        toFiniteNumber(row?.realizedProfit),
+        toFiniteNumber(row?.dividendAmount),
+        toFiniteNumber(row?.quantity),
+        toFiniteNumber(row?.totalCost),
+        toFiniteNumber(row?.marketValue),
+      ].join('|'),
+    )
+    .join(';'),
+);
+
+watch(actualSubRowSignature, scheduleActualSubRows);
+
+onUnmounted(() => {
+  actualSubRowObserver?.disconnect();
+  actualSubRowObserver = null;
+});
 
 // ---- 最近修改时间 ----
 function formatUpdatedAt(iso) {
@@ -520,10 +750,18 @@ async function saveTableData() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(tableData.value),
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (!resp.ok) {
+      // 后端对「骤减式全量覆盖」会 400 熔断，这里把原因透出去（含改用 PATCH 的提示）
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(readApiError(err, `HTTP ${resp.status}`));
+    }
   } catch (error) {
     console.error('保存到文件失败:', error);
-    ElMessage.error('保存失败：持仓数据没有写入文件，请确认开发服务仍在运行');
+    const detail = String(error?.message || '');
+    const reason = detail && !/failed to fetch|networkerror/i.test(detail)
+      ? detail
+      : '持仓数据没有写入数据库，请确认开发服务仍在运行';
+    ElMessage.error(`保存失败：${reason}`);
   }
 }
 
@@ -758,6 +996,7 @@ async function syncFundFlow() {
 }
 
 function openDrawer(row) {
+  if (!row || !row.code) return;
   drawerCode.value = String(row.code || '').trim();
   drawerName.value = row.name || '';
   drawerValuation.value = {
@@ -887,7 +1126,7 @@ async function confirmAdd() {
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${resp.status}`);
+      throw new Error(readApiError(err, `HTTP ${resp.status}`));
     }
     const saved = await resp.json();
     const existIdx = tableData.value.findIndex(item => item.code === saved.code);
@@ -912,6 +1151,8 @@ function openEditDialog(row) {
     name: row.name,
     costPrice: Number(row.costPrice) || 0,
     quantity: Number(row.quantity) || 0,
+    realizedProfit: Number(row.realizedProfit) || 0,
+    dividendAmount: Number(row.dividendAmount) || 0,
     avgPe: String(row.avgPe ?? '-'),
     eps: String(row.eps ?? '-'),
     eps3y: String(row.eps3y ?? '-'),
@@ -937,7 +1178,7 @@ async function doDividendPreview() {
     const qs = new URLSearchParams({ current_cost: String(cost), current_shares: String(shares) });
     const resp = await fetch(`${PORTFOLIO_API}/positions/${code}/dividend-preview?${qs.toString()}`);
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    if (!resp.ok) throw new Error(readApiError(data, `HTTP ${resp.status}`));
     if (!data.found) {
       dividendError.value = data.message || '未查到分红记录';
     } else {
@@ -961,30 +1202,26 @@ async function confirmEdit() {
   if (idx < 0) return;
   const row = tableData.value[idx];
 
-  // 走单条 PUT 接口修改，后端会刷新 updated_at（作为「最近整理时间」）。
+  // 走 PATCH 单条局部更新：只提交弹窗里能改的字段，后端只有 UPDATE、
+  // 不含任何 DELETE，绝不可能波及别的持仓行（POST /api/portfolio 是全量覆盖语义）。
   const payload = {
-    code: row.code,
-    name: row.name,
-    sector: row.sector,
     costPrice: Number(editForm.value.costPrice) || 0,
     quantity: Number(editForm.value.quantity) || 0,
-    currentPrice: Number(row.currentPrice) || 0,
-    pb: row.pb,
-    pe: row.pe,
-    roe: row.roe,
+    realizedProfit: Number(editForm.value.realizedProfit) || 0,
+    dividendAmount: Number(editForm.value.dividendAmount) || 0,
     avgPe: String(editForm.value.avgPe || '').trim() || '-',
     eps: String(editForm.value.eps || '').trim() || '-',
     eps3y: String(editForm.value.eps3y || '').trim() || '-',
   };
   try {
-    const resp = await fetch(`${PORTFOLIO_API}/positions/${row.code}`, {
-      method: 'PUT',
+    const resp = await fetch(`${PORTFOLIO_API}/${encodeURIComponent(row.code)}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${resp.status}`);
+      throw new Error(readApiError(err, `HTTP ${resp.status}`));
     }
     const saved = await resp.json();
     tableData.value[idx] = saved;
@@ -1056,6 +1293,7 @@ onMounted(() => {
   void (async () => {
     await loadTableDataFromFile();
     refreshDerivedFields(false);
+    scheduleActualSubRows();
     void loadFundSummary();
   })();
 });
@@ -1066,6 +1304,7 @@ const openAnalysisReport = inject('openAnalysisReport', () => {});
 watch(appRefreshSignal, () => {
   void loadTableDataFromFile().then(() => {
     refreshDerivedFields(false);
+    scheduleActualSubRows();
     void loadFundSummary();
   });
 });
@@ -1081,7 +1320,7 @@ watch(appRefreshSignal, () => {
       <el-button type="danger" plain :loading="syncingFundFlow" @click="syncFundFlow">同步主力资金</el-button>
     </div>
 
-    <el-table class="portfolio-table" :data="tableData" border style="width: 100%" max-height="620" :cell-class-name="tableCellClassName" :row-class-name="tableRowClassName" show-summary :summary-method="getSummaries" size="small" @row-click="openDrawer">
+    <el-table ref="portfolioTableRef" class="portfolio-table" :data="tableData" border style="width: 100%" max-height="620" :cell-class-name="tableCellClassName" :row-class-name="tableRowClassName" show-summary :summary-method="getSummaries" size="small" @row-click="openDrawer">
       <el-table-column type="index" label="序号" min-width="38" align="center" />
       <el-table-column prop="code" label="代码" min-width="62" align="center" />
       <el-table-column prop="name" label="名称" min-width="84" align="center">
@@ -1260,6 +1499,13 @@ watch(appRefreshSignal, () => {
       <el-form-item label="持仓数量">
         <el-input-number v-model="editForm.quantity" :min="0" :step="10" />
       </el-form-item>
+      <el-form-item label="做T实现盈亏">
+        <el-input-number v-model="editForm.realizedProfit" :min="-99999999" :step="100" :precision="2" controls-position="right" />
+      </el-form-item>
+      <el-form-item label="分红收益">
+        <el-input-number v-model="editForm.dividendAmount" :min="-99999999" :step="100" :precision="2" controls-position="right" />
+      </el-form-item>
+      <div class="actual-hint">填同花顺的「实现盈亏 / 分红收益」（默认 0）。非 0 时主行下方出现「实际持仓还原」附属行：实际成本金额 = 成本金额 + 已落袋</div>
       <el-form-item label="平均pe">
         <el-input v-model.trim="editForm.avgPe" />
       </el-form-item>
@@ -1727,6 +1973,80 @@ watch(appRefreshSignal, () => {
   color: #059669;
   font-variant-numeric: tabular-nums;
   font-size: 0.95rem;
+}
+
+/* ---- 已落袋（做T/分红）附属行 ---- */
+.actual-hint {
+  margin: -4px 0 14px 110px;
+  color: #7b8ca3;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+/* 紧凑小字 + 与主行同色系浅底 + 顶部极细虚线，视觉上与主行融为一体 */
+:deep(.portfolio-table .actual-sub-row td.el-table__cell) {
+  padding: 1px 0;
+  background-color: #f7fbfe !important;
+  border-top: 1px dashed #c9dcee;
+  border-bottom: 1px solid #eef4fa;
+  color: #5b7290;
+  font-size: 12px;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 黄底风险行的附属行跟随同色系（浅黄） */
+:deep(.portfolio-table .actual-sub-row.actual-sub-row--risk td.el-table__cell) {
+  background-color: #fffbe8 !important;
+  border-top-color: #f0dca8;
+  border-bottom-color: #fbf1cf;
+}
+
+/* 主行 hover 时附属行一起高亮，保持整块联动 */
+:deep(.portfolio-table .el-table__body tr.el-table__row:hover + .actual-sub-row td.el-table__cell),
+:deep(.portfolio-table .el-table__body .actual-sub-row:hover td.el-table__cell) {
+  background-color: #eef5fb !important;
+}
+
+:deep(.portfolio-table .actual-sub-row.actual-sub-row--risk:hover td.el-table__cell),
+:deep(.portfolio-table .el-table__body tr.risk-row:hover + .actual-sub-row.actual-sub-row--risk td.el-table__cell) {
+  background-color: #fdf3cf !important;
+}
+
+:deep(.portfolio-table .actual-sub-row td.c-right) {
+  text-align: right;
+}
+
+:deep(.portfolio-table .actual-sub-row td.c-center) {
+  text-align: center;
+}
+
+:deep(.portfolio-table .actual-sub-row .is-muted) {
+  color: #9aabbf;
+}
+
+:deep(.portfolio-table .actual-sub-row .subrow-line) {
+  display: block;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+
+:deep(.portfolio-table .actual-sub-row .is-strong) {
+  color: #2b3f55;
+  font-weight: 600;
+}
+
+:deep(.portfolio-table .actual-sub-row .is-up) {
+  color: #f56c6c;
+  font-weight: 700;
+}
+
+:deep(.portfolio-table .actual-sub-row .is-down) {
+  color: #16a34a;
+  font-weight: 700;
 }
 
 </style>

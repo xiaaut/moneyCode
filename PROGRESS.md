@@ -44,6 +44,7 @@ my-finance-system/
 │   ├── migrate_financials.py         # 财报三表/笔记表建表（stock_financial_statements + stock_analysis_notes）
 │   ├── migrate_rebalance.py          # rebalance_plans 表建表（调仓工单，CREATE TABLE IF NOT EXISTS，幂等）
 │   ├── migrate_positions_updated_at.py # positions.updated_at 隔离迁移（存量锚定 2026-01-01，幂等）
+│   ├── migrate_positions_actual.py   # positions 新增 realized_profit / dividend_amount（幂等，支持 --target local|nas|both 与 --compare 双库结构比对）
 │   └── app/
 │       ├── main.py                   # 入口：lifespan + CORS + 路由挂载 + 统一异常
 │       ├── core/config.py            # pydantic-settings 配置（NAS 连接、连接池、同花顺数据源）
@@ -153,8 +154,10 @@ my-finance-system/
 
 ### 3.2 positions（22 行）— 当前持仓
 
-`id`(bigint PK) · `code`(varchar **unique**+index) · `name` · `shares`(int) · `cost_price` · `current_price` · `market_value` · `profit_amount` · `profit_ratio` · `sector` · `position_ratio` · `extra`(jsonb) · `created_at` · `updated_at`。
+`id`(bigint PK) · `code`(varchar **unique**+index) · `name` · `shares`(int) · `cost_price` · `current_price` · `market_value` · `profit_amount` · `profit_ratio` · `sector` · `position_ratio` · `realized_profit`(numeric 18,2 默认 0) · `dividend_amount`(numeric 18,2 默认 0) · `extra`(jsonb) · `created_at` · `updated_at`。
 > 市值/盈亏/占比为按现价的快照值；同一代码多条持仓在迁移时按股数加权合并成本。
+>
+> **已落袋两列（2026-11-19 新增）**：`realized_profit` = 做T已实现盈亏（同花顺「实现盈亏」）、`dividend_amount` = 累计现金分红（同花顺「分红收益」）。**只服务前端附属行的「实际持仓还原」展示，不进入主行/汇总行任何计算**。两列为 nullable + `DEFAULT 0`：整数组覆盖 `POST /api/portfolio` 不带这两个字段时，服务端用 `COALESCE(excluded, 原值)` 保留库中数据，只有显式传 `0` 才清零。
 >
 > **updated_at 隔离铁律**：仅用户主动「新增持仓 `POST /api/portfolio/positions` / 修改持仓 `PUT /api/portfolio/positions/{code}`」时刷新为当前时间；后台「刷新现价 / 刷新 ROE / 收盘一键更新」只更新 stocks/kline/financials，**严禁触碰 positions.updated_at**（模型已移除 `onupdate`，整数组覆盖 `POST /api/portfolio` 也不更新该字段）。存量记录由 `migrate_positions_updated_at.py` 统一锚定为 `2026-01-01 00:00:00+08`，便于区分「尚未整理」。
 
@@ -231,10 +234,11 @@ my-finance-system/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/portfolio` | 持仓列表（纯数组，camelCase） |
-| POST | `/api/portfolio` | 整数组覆盖持仓（按 code upsert + 删除多余） |
+| GET | `/api/portfolio` | 持仓列表（纯数组，camelCase；含 `realizedProfit` / `dividendAmount`） |
+| POST | `/api/portfolio` | 整数组覆盖持仓（按 code upsert + **删除未提交的 code**；已落袋两列缺省时 COALESCE 保留原值；带**防误删熔断**，见下） |
 | POST | `/api/portfolio/positions` | 新增/修改单条持仓（刷新 updated_at，异步触发 auto_onboard_stock） |
-| PUT | `/api/portfolio/positions/{code}` | 按代码修改持仓（刷新 updated_at） |
+| PUT | `/api/portfolio/positions/{code}` | 按代码整行修改持仓（刷新 updated_at，兼容旧调用） |
+| **PATCH** | **`/api/portfolio/{code}`** | **按代码局部更新（只 UPDATE 单行、绝无 DELETE）：只写入本次提交的字段，其余保持原值；自动重算市值/盈亏/盈亏率/仓位占比并刷新 updated_at** |
 | DELETE | `/api/portfolio/{code}` | 删除持仓（`archive=true` 时写入 trade_history） |
 | GET | `/api/portfolio/positions/{code}/dividend-preview` | 分红除权成本试算（`current_cost=`/`current_shares=` 可选，主通道同花顺 adjustment-factors + 东财 RPT_SHAREBONUS_DET 备用） |
 | GET | `/api/watchlist` | 观察列表 |
@@ -243,6 +247,14 @@ my-finance-system/
 | DELETE | `/api/watchlist/{item_id}` | 删除观察项 |
 | GET | `/api/closed-positions` | 清仓记录列表 |
 | POST | `/api/closed-positions` | 整数组覆盖清仓记录（缺字段服务端兜底推导盈亏/持有天数） |
+
+> ⚠️ **`POST /api/portfolio` 是「全量覆盖」语义**：服务端会 `DELETE FROM positions WHERE code NOT IN (提交的 code)`。
+> 用部分数组调用会静默删掉未提交的持仓（2026-11-19 已踩过一次，靠 NAS 冷备 `db_sync.py` 的 positions 快照复原）。
+> 单条写入一律走 `PATCH /api/portfolio/{code}`；只有前端「整表保存」才允许打全量接口。
+>
+> 🛡️ **防误删熔断**（2026-11-19 加固）：库内现有 >3 条、而本次提交 ≤1 条 **或** 少于现有的 50% 时，
+> 直接返回 `400` 并提示改用 `PATCH`，**不执行任何 DELETE**。确需批量清理要显式加 `?force=true`。
+> 逐条删除（每次 N-1）不会触发；批量导入（数组变长）不会触发。
 
 ### 4.2 股票池筛选 / AKShare 全市场（stocks.py）
 
@@ -947,3 +959,178 @@ UI 实测：牌面 2 个回合（1 待接回 / 1 已闭环）、标尺圆点与�
 - 按差价 0.062 元：区间 `3.768 ~ 4.512`，速查 `按差价：上涨 ¥0.062 卖出 / 下跌 ¥0.062 买入`
 - 按比例 1.50%：区间 `3.787 ~ 4.526`（= 4.14×1.015^6 / 4.14÷1.015^6），速查同步
 - 页面上不再有「高级」开关、网格数量、上下限输入框；8 宫格字段不变；`npm run build` 通过
+
+
+### 13.7 明细表横幅位置 + 标尺刻度精度修复（2026-11-18）
+
+**问题 1：现价横幅插错行**
+
+原 `levelRows` 用 `现价 >= level.buyPrice` 决定插入点。当某档为「已持仓·待卖出」且 `buyPrice < 现价 < sellPrice`（最低一档恰好买入价=基准价、卖价高于现价）时，横幅被插到该档**之前**，把它压到线下方，与顶部标尺（该档是橙色）矛盾。
+
+修复：**按状态分区**——所有 `holding` 档排在上方，所有 `idle` 档排在下方，横幅固定落在两者分界处。等价语义是「有效触发价」：已持仓取 `sellPrice`、待买入取 `buyPrice`。
+
+```js
+const holdingRows = ordered.filter(l => levelStatus(l).code === 'holding');
+const idleRows    = ordered.filter(l => levelStatus(l).code !== 'holding');
+const rows = [...holdingRows, ...(divider ? [dividerRow] : []), ...idleRows];
+```
+
+**问题 2：标尺刻度被截成 2 位**
+
+模板里 `ruler.lower.toFixed(2)` / `ruler.upper.toFixed(2)` / `basePrice.toFixed(2)` 把 `0.380 / 0.434 / 0.524` 显示成 `0.38 / 0.43 / 0.52`。
+
+修复：新增 `priceDigits` computed —— ETF（51/15/56/58）或任一价格含 3 位小数时返回 3，普通股票返回 2：
+
+```js
+const priceDigits = computed(() => {
+  if (isEtf.value) return 3;
+  const need3 = [basePrice, stepInput, planUpper, planLower]
+    .some(v => v > 0 && Math.abs(v * 100 - Math.round(v * 100)) > 1e-6);
+  return need3 ? 3 : 2;
+});
+```
+
+**实测**（510300，把基准价临时改 4.00 构造边界场景）：
+
+- 标尺：`下限 3.628 / 基准 4.000 / 上限 4.372`（3 位）
+- 现价 4.058，档 7 `买 4.000 / 卖 4.062` 为已持仓：横幅落在档 5 之后，档 1~4（待买入）全部在线下
+- 自动校验：线上无「待买入」、线下无「已持仓」→ **OK 橙上蓝下**
+- 横幅百分比同步正确：最近买档 `3.814 → -6.01%`、最近卖档 `4.062 → +0.10%`
+- `npm run build` 通过
+
+## 14. 持仓「实际成本还原」附属行（做T / 分红）2026-11-19
+
+### 14.1 需求口径
+
+主行保持同花顺摊薄口径不动（成本价 15.02 / 成本金额 3004.000 / 盈亏额 4656.000 / 盈亏% 154.99%），底部「汇总」行也仍按主行汇总。做T与分红属于**已落袋现金**，摊薄成本价不含它，但本金确实收回了，所以另起一条小字附属行还原「真金白银投入」：
+
+| 指标 | 公式 | 达仁堂实测 |
+|---|---|---|
+| 已落袋 | `realized_profit + dividend_amount` | 2526.51 + 1821.00 = **4347.51** |
+| 实际成本金额 | 主行成本金额 + 已落袋 | 3004.000 + 4347.51 = **7351.510** |
+| 实际成本价 | 实际成本金额 ÷ 持仓量（3 位小数） | 7351.51 ÷ 200 = **36.758** |
+| 当前实际获利 | 主行市值 − 实际成本金额（≡ 主行盈亏额 − 已落袋） | 7660.00 − 7351.51 = **+308.49** |
+| 当前实际盈亏% | 当前实际获利 ÷ 实际成本金额 × 100 | **+4.20%** |
+
+### 14.2 数据与接口
+
+| 层 | 变更 |
+|---|---|
+| `positions` 表 | 新增 `realized_profit` / `dividend_amount`（`NUMERIC(18,2) DEFAULT 0`，nullable） |
+| 迁移 | `stock-service/migrate_positions_actual.py`（幂等 `ADD COLUMN IF NOT EXISTS` + 存量 NULL → 0） |
+| Schema | `PositionOut.realized_profit/dividend_amount: float = 0.0`；`PositionIn` 两者默认 **None = 未提供** |
+| 写入 | 两处 upsert 统一走 `_conflict_set_map()`：这两列用 `COALESCE(excluded, 原值)`，**整数组覆盖（刷新现价）不会把它们清零** |
+| 编辑入口 | 「修改」弹窗新增 `做T实现盈亏` / `分红收益` 两个 `el-input-number`（默认 0，可负） |
+
+### 14.3 前端实现（Positions.vue）
+
+el-table 没有「在主行下方插一条数据之外的 `<tr>`」能力（`type="expand"` 会多一列、破坏 14 列布局），因此走 **DOM 托管**：
+
+```js
+syncActualSubRows()  // 只对 hasActualAdjustment(row) 的行插入/更新 tr.actual-sub-row
+```
+
+三条防错设计：
+
+1. **按代码回查行数据**：不按 `tbody.children` 下标取 `tableData[index]`（排序后必错位），改读主行第 2 个 cell 的代码文本 → `Map<code, row>`。
+2. **MutationObserver 兜底**：监听 body tbody 的 `childList/subtree/characterData`，覆盖 el-table 内部重渲染、排序、行内容 patch；同步前后 `disconnect/observe` + `actualSubRowSyncing` 标志防止自触发死循环。
+3. **签名比对**：每行用 `JSON.stringify(cells)` 存到 `tr.dataset.signature`，内容没变就不重建，避免逐帧闪烁。
+
+样式：`padding: 1px 0` / `font-size: 12px` / 顶部 `1px dashed` / 底色 `#f7fbfe`（黄底风险行自动切 `#fffbe8` 同色系）/ 序号列留空不占号。
+
+### 14.4 踩坑记录
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 「盈亏额」列文字被省略号截断 | 该列实宽仅 **112px**，`已落袋 4347.51 \| 当前获利 +308.49` 需要 **202px** | 按 `\|` 折成两行（`span.subrow-line` 块级），实测行高 36px，仍远矮于主行 46px |
+| 黄底行悬停说明整行错位 | `handleRiskTipMove` 用 `parent.children` 下标反查 `tableData[index]`，附属行把行序顶乱 | 先过滤掉 `.actual-sub-row` 再 `indexOf` |
+| 点附属行会打开资金流抽屉 | el-table 的 row-click 是行内绑定（本不该触发），但保险起见 | `openDrawer(row)` 增加 `if (!row || !row.code) return` |
+
+### 14.5 实测（本地 3000 + 8000，临时写入后已还原）
+
+- 达仁堂 600329：附属行紧贴主行，15 列逐列 `left/width` 误差 < 1px，字号 12px，`+308.49` / `+4.20%` 显示红色（`#f56c6c`，正数）
+- 伊利股份 600887（非黄底行）：`实际 29.996 / 实际 5999.200 / 已落袋 1500.00 +478.80 / 当前 +7.98%`，浅蓝底 + 虚线正常
+- 点「修改时间」表头升/降序：附属行始终跟住 600329，未错位
+- 汇总行仍为 `204418.29 / 187321.40 / -17096.89 / -8.36%`（= 主行口径，未被已落袋污染）
+- `npm run build`（vue-tsc + vite build）通过
+
+## 15. 双库同构 + PATCH 单条更新 + 防误删熔断（2026-11-19）
+
+### 15.1 NAS 冷备库表结构同构
+
+`migrate_positions_actual.py` 升级为「可指定目标库」：
+
+```bash
+python migrate_positions_actual.py                  # 只迁本地主库（默认）
+python migrate_positions_actual.py --target nas     # 只迁 NAS 冷备库
+python migrate_positions_actual.py --target both    # 双库一起迁
+python migrate_positions_actual.py --compare        # 只读比对双库列结构（不写任何数据）
+```
+
+- 迁移只做 `ADD COLUMN IF NOT EXISTS ... NUMERIC(18,2) DEFAULT 0` + 新列空值补 0，**不搬运任何持仓数据**；
+  NAS 旧数据不会被反向覆盖到本地（这是「结构同构」，不是「数据回灌」；数据回灌只在 `db_sync.py pull-from-nas` 时发生）。
+- `--compare` 只读 `information_schema.columns`，逐列比对 `data_type / numeric_precision / numeric_scale / is_nullable / column_default`，有差异时退出码 1。
+- 执行结果：本地 16 列 / NAS 16 列，**两库 positions 列结构完全一致**。
+
+> 备份口径提醒：`db_sync.py` 的 `ensure_schema()` 本来就会按 ORM 给目标库补列，所以下次 `push-to-nas` 也会自动带上这两列；
+> 本迁移的意义是「不等下次推送、当场把 NAS 结构对齐」，避免回灌时缺列。
+
+### 15.2 `PATCH /api/portfolio/{code}`：单条更新，永不含 DELETE
+
+| 项 | 说明 |
+|---|---|
+| 入参 | `PositionPatch`（全部字段可空，`model_dump(exclude_unset=True)` 只取「本次提交」的键） |
+| 写入 | 只 `UPDATE positions WHERE code = :code`；未提交字段一律保持原值；`code` 由路径决定，不接受改代码 |
+| 重算 | 该行 `market_value / profit_amount / profit_ratio` 按 `cost_price × shares`、`current_price × shares` 重算 |
+| 占比 | 全表 `position_ratio` 批量重算（派生快照，**不触碰其他行 updated_at**） |
+| 时间 | 显式刷新该行 `updated_at`（用户主动修改，符合隔离铁律） |
+| 边界 | 代码非 6 位 → 400；持仓不存在 → 404；空 body → 400 |
+
+前端 `Positions.vue` 的「修改 → 保存」已从 `PUT /positions/{code}` 切到 `PATCH /{code}`，且 payload 只带弹窗能改的 7 个字段
+（`costPrice / quantity / realizedProfit / dividendAmount / avgPe / eps / eps3y`），彻底脱离全量覆盖路径。
+
+### 15.3 `POST /api/portfolio` 防误删熔断
+
+```python
+existing = count(*) from positions
+submitted = len(payload)
+if not force and existing > 3 and (submitted <= 1 or submitted < existing * 0.5):
+    raise HTTPException(400, "...改用 PATCH /api/portfolio/{code}；确需批量清理请加 ?force=true")
+```
+
+| 场景 | submitted | 是否熔断 |
+|---|---|---|
+| 前端整表保存 / 刷新现价（25→25） | 25 | 否 |
+| 逐条删除（25→24→23…） | 每次 N-1 | 否（永远 > 50%） |
+| 批量导入（数组变长） | N+k | 否 |
+| 单行数组 / 空数组 | 1 / 0 | **是（400，不执行 DELETE）** |
+| 一次删掉一半以上 | < N/2 | **是**（需 `?force=true`） |
+| 库内 ≤3 条时清空 | 0 | 否（`existing > 3` 不成立） |
+
+前端 `saveTableData()` 已把后端 `message` 透出到 `ElMessage`，熔断时用户能直接看到「改用 PATCH / force」的提示。
+
+### 15.4 附属行除零兜底
+
+负数做T可能把「实际成本金额」压到 ≤0，此时 `当前实际盈亏%` 会算出 `NaN` / `Infinity`：
+
+```js
+const ratioValid = actualCost > 0;
+{ text: ratioValid ? formatSigned(actualRatio, 2, '%') : '--', className: ratioValid ? tone : 'is-muted' }
+```
+
+同时 `formatSigned()` 对非有限值统一返回 `--`；持仓量为 0 时成本价显示 `实际 --`。
+
+### 15.5 验收记录（2026-11-19）
+
+| 断言 | 结果 |
+|---|---|
+| `PATCH /api/portfolio/600329` 写已落袋 / 改数量 200→210→200 | 200，市值 8011.5（=38.15×210）、成本 3154.2（=15.02×210）自动重算，改回后还原原值 |
+| 每次 PATCH 后持仓行数 | 恒为 **25** |
+| 每次 PATCH 后汇总（成本 / 市值 / 盈亏） | `204418.29 / 188093.40 / -16324.89` 全程不变 |
+| `POST` 单行数组 / 两行数组 / 空数组 | 均 **400** 熔断，库内仍 25 行、成本仍 `204418.29` |
+| `PATCH` 不存在代码 / 空 body | 404 / 400 |
+| 双库结构比对 | 16 列完全一致 |
+| `npm run build` | 通过（vue-tsc + vite） |
+
+> 测试全程只动了达仁堂一行，测完已用 `PATCH` 还原其 `realized_profit=2526.51 / dividend_amount=1821.00`，
+> 并把 `updated_at` 恢复为测试前的 `2026-11-18T17:39:42.360715+00:00`；未执行任何 `./dev.sh` 或 kill。

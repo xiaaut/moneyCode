@@ -44,6 +44,15 @@ class Position(Base):
     position_ratio: Mapped[Decimal | None] = mapped_column(
         Numeric(10, 4), comment="占总仓位比例(%)"
     )
+
+    # 做T/分红的「已落袋」修正常量（前端据此在主行下方追加「实际持仓还原」附属行）。
+    # 允许为空：整数组覆盖（刷新现价等）不带这两个字段时用 COALESCE 保留库中原值。
+    realized_profit: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2), default=Decimal("0"), server_default=text("0"), comment="做T已实现盈亏(元)"
+    )
+    dividend_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2), default=Decimal("0"), server_default=text("0"), comment="累计现金分红(元)"
+    )
     extra: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
