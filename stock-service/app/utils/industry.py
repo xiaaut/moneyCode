@@ -20,6 +20,9 @@ INDUSTRY_SUFFIX_RE = re.compile(r"[\s\u3000]*([IⅠⅡⅢⅣV]+)$")
 # 供 SQL 侧复用的字符类（PostgreSQL 不支持 \uXXXX 转义，必须用字面量全角空格）
 SQL_SUFFIX_PATTERN = "[[:space:]　]*[IⅠⅡⅢⅣV]+$"
 
+# 占位符：'-' / '--' / '—' / '–' / '－' / 纯空白 → 一律视为「无板块」
+_PLACEHOLDER_RE = re.compile(r"^[\s\u3000\-—–－_/]*$")
+
 
 def clean_industry_name(val: str | None) -> str:
     """清洗行业/板块名称，返回干净字符串（None -> ""）。
@@ -43,6 +46,17 @@ def clean_industry_name(val: str | None) -> str:
 
 
 def clean_industry_or_none(val: str | None) -> str | None:
-    """入库专用：清洗后为空则返回 None，配合 coalesce 语义（空值不覆盖旧值）。"""
-    cleaned = clean_industry_name(val)
-    return cleaned or None
+    """入库专用：清洗后为空 / 纯占位符则返回 None，配合 coalesce 语义（空值不覆盖旧值）。
+
+    占位符（'-'、'--'、'—'、'–'、'－'、纯空白）一律视作「无板块」，
+    避免把前端「未知」标记当成有效行业名入库，导致板块分组多出一个 '-' 分组。
+    """
+    if val is None:
+        return None
+    text = str(val).strip()
+    if not text or _PLACEHOLDER_RE.match(text):
+        return None
+    cleaned = clean_industry_name(text)
+    if not cleaned or _PLACEHOLDER_RE.match(cleaned):
+        return None
+    return cleaned

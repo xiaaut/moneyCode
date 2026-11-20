@@ -1,7 +1,7 @@
 <script setup>
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { mergeHoldings, parseHoldingsText } from '../utils/holdingsImport.js';
+import { isFundCode, mergeHoldings, normalizeSectorText, parseHoldingsText, resolveSector } from '../utils/holdingsImport.js';
 import FundFlowSpark from './FundFlowSpark.vue';
 import FundFlowDrawer from './FundFlowDrawer.vue';
 
@@ -160,6 +160,7 @@ const editForm = ref({
   id: 0,
   code: '',
   name: '',
+  sector: '',
   costPrice: 0,
   quantity: 0,
   realizedProfit: 0,
@@ -281,6 +282,8 @@ const formatThreeDecimalCell = (_, __, value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num.toFixed(3) : value;
 };
+// 板块列展示：脏后缀 / 占位符统一收敛为「未分类」
+const sectorCellText = (_, __, value) => normalizeSectorLabel(value);
 
 // ---------------------------------------------------------------------------
 // 已落袋（做T/分红）→ 主行下方「实际持仓还原」附属行
@@ -542,10 +545,14 @@ const piePalette = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#14b
 
 const totalMarketValueNum = computed(() => tableData.value.reduce((sum, row) => sum + (Number(row.marketValue) || 0), 0));
 
+// 板块展示/聚合统一口径：剥掉 II/Ⅱ 等分级后缀，占位符与空值统一为「未分类」，
+// 避免同一行业因脏数据（中药 / 中药Ⅱ / '-'）在饼图和汇总表里裂成多块。
+const normalizeSectorLabel = value => normalizeSectorText(value) || '未分类';
+
 const sectorBreakdown = computed(() => {
   const groups = new Map();
   tableData.value.forEach(row => {
-    const sector = row.sector || '未分类';
+    const sector = normalizeSectorLabel(row.sector);
     if (!groups.has(sector)) {
       groups.set(sector, {
         sector,
@@ -581,7 +588,7 @@ const stockBreakdown = computed(() => {
     return {
       name: row.name || row.code || '-',
       ratio,
-      sector: row.sector || '未分类',
+      sector: normalizeSectorLabel(row.sector),
     };
   });
   rows.sort((a, b) => b.ratio - a.ratio);
@@ -675,15 +682,17 @@ const stockPieData = computed(() => {
 function recalcRow(row) {
   const quantity = Number(row.quantity) || 0;
   const costPrice = Number(row.costPrice) || 0;
+  // 现价保留原始精度（ETF 常见 3 位小数，如 4.058）：先截成 2 位再乘 4000 股会多算 8 元
   const currentPrice = Number(row.currentPrice) || 0;
-  const totalCost = costPrice * quantity;
-  const marketValue = currentPrice * quantity;
-  const profitAmount = marketValue - totalCost;
-  const profitRatio = totalCost > 0 ? (profitAmount / totalCost) * 100 : 0;
+  const totalCostRaw = costPrice * quantity;
+  const marketValueRaw = currentPrice * quantity;
+  const profitAmountRaw = marketValueRaw - totalCostRaw;
+  const profitRatio = totalCostRaw > 0 ? (profitAmountRaw / totalCostRaw) * 100 : 0;
 
-  row.totalCost = Number(formatMoney(totalCost));
-  row.marketValue = Number(formatMoney(marketValue));
-  row.profitAmount = Number(formatMoney(profitAmount));
+  // 只在「展示 / 落盘」这一步收敛到 2 位小数，中间计算一律用原始精度
+  row.totalCost = Number(formatMoney(totalCostRaw));
+  row.marketValue = Number(formatMoney(marketValueRaw));
+  row.profitAmount = Number(formatMoney(profitAmountRaw));
   row.profitRatio = formatPercent(profitRatio);
 }
 
@@ -803,10 +812,11 @@ function parseCode(rawCode) {
   };
 }
 
-function getPriceFromQuoteItem(item) {
+function getPriceFromQuoteItem(item, code) {
   const priceRaw = Number(item.f2);
   if (!Number.isFinite(priceRaw) || priceRaw <= 0) return null;
-  return Number(priceRaw.toFixed(2));
+  // ETF/LOF 价格常有 3 位小数（4.058）：截成 2 位会让 4000 股多算 8 元，与后端账面不一致
+  return Number(priceRaw.toFixed(isFundCode(code) ? 3 : 2));
 }
 
 function buildRoeCodes(rows) {
@@ -881,8 +891,9 @@ async function refreshCurrentPrices() {
       const quoteName = String(quote.f14 || '').trim();
       if (quoteName && (!row.name || row.name === row.code)) row.name = quoteName;
 
-      const quoteSector = String(quote.f100 || '').trim();
-      if (quoteSector && (!row.sector || row.sector === '-' || row.sector === '未分类')) row.sector = quoteSector;
+      const quoteSector = normalizeSectorText(quote.f100);
+      // 只在「本地没有有效板块」时补全；用户自定义板块（如给 ETF 设的「黄金」）不会被覆盖
+      if (quoteSector && !normalizeSectorText(row.sector)) row.sector = quoteSector;
 
       if (row.pb === '-' || row.pb === undefined || row.pb === null || row.pb === '') {
         const pbNum = Number(quote.f23);
@@ -896,7 +907,7 @@ async function refreshCurrentPrices() {
         row.pe = '亏损';
       }
 
-      const price = getPriceFromQuoteItem(quote);
+      const price = getPriceFromQuoteItem(quote, row.code);
       if (price === null) return;
       row.currentPrice = price;
       updatedCount += 1;
@@ -1091,9 +1102,10 @@ async function confirmAdd() {
       return;
     }
 
-    const currentPrice = getPriceFromQuoteItem(quote) ?? 0;
+    const currentPrice = getPriceFromQuoteItem(quote, parsed.pureCode) ?? 0;
     const name = String(quote.f14 || parsed.pureCode);
-    const sector = String(quote.f100 || '-');
+    // ETF/LOF 行情源常不给行业（f100 为空或 '-'），统一兜底为「基金」，避免落进「未分类」
+    const sector = resolveSector(parsed.pureCode, quote.f100);
     const pb = Number.isFinite(Number(quote.f23)) ? Number(Number(quote.f23).toFixed(2)) : '-';
     let pe = '亏损';
     if (Number.isFinite(Number(quote.f115))) pe = Number(Number(quote.f115).toFixed(2));
@@ -1149,6 +1161,8 @@ function openEditDialog(row) {
     id: row.id,
     code: row.code,
     name: row.name,
+    // 脏后缀不要带进编辑框，避免用户「什么都没改」又把 Ⅱ 存回去
+    sector: normalizeSectorText(row.sector),
     costPrice: Number(row.costPrice) || 0,
     quantity: Number(row.quantity) || 0,
     realizedProfit: Number(row.realizedProfit) || 0,
@@ -1205,6 +1219,7 @@ async function confirmEdit() {
   // 走 PATCH 单条局部更新：只提交弹窗里能改的字段，后端只有 UPDATE、
   // 不含任何 DELETE，绝不可能波及别的持仓行（POST /api/portfolio 是全量覆盖语义）。
   const payload = {
+    sector: normalizeSectorText(editForm.value.sector) || null,
     costPrice: Number(editForm.value.costPrice) || 0,
     quantity: Number(editForm.value.quantity) || 0,
     realizedProfit: Number(editForm.value.realizedProfit) || 0,
@@ -1331,7 +1346,7 @@ watch(appRefreshSignal, () => {
           <span v-if="fundSummary[scope.row.code]?.lhb" class="lhb-badge" title="近期登龙虎榜">🔥</span>
         </template>
       </el-table-column>
-      <el-table-column prop="sector" label="板块" min-width="74" align="center" show-overflow-tooltip />
+      <el-table-column prop="sector" label="板块" min-width="74" align="center" show-overflow-tooltip :formatter="sectorCellText" />
       <el-table-column prop="costPrice" label="成本价" min-width="60" align="right" />
       <el-table-column prop="quantity" label="持仓量" min-width="58" align="right" />
       <el-table-column prop="currentPrice" label="现价" min-width="56" align="right" :formatter="formatThreeDecimalCell" />
@@ -1481,6 +1496,9 @@ watch(appRefreshSignal, () => {
       </el-form-item>
       <el-form-item label="股票名称">
         <el-input v-model="editForm.name" disabled />
+      </el-form-item>
+      <el-form-item label="板块">
+        <el-input v-model.trim="editForm.sector" placeholder="个股行业或自定义板块，留空即「未分类」" clearable />
       </el-form-item>
       <el-form-item label="成本价">
         <el-input-number v-model="editForm.costPrice" :min="0" :step="0.001" :precision="3" />

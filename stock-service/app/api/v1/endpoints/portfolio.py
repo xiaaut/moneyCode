@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,7 @@ from app.db.session import get_db
 from app.models import Position, TradeHistory, WatchlistItem
 from app.schemas.common import OkResponse, fmt_num, fmt_pct, num_or_dash, parse_number
 from app.services import onboarding
+from app.services.position_metrics import recalc_position_ratios
 from app.utils.industry import clean_industry_or_none
 from app.schemas.portfolio import (
     ClosedPositionCreate,
@@ -77,7 +78,9 @@ def _position_to_out(position: Position, total_market_value: float) -> PositionO
         sector=position.sector,
         cost_price=round(cost_price, 3),
         quantity=quantity,
-        current_price=round(current_price, 2),
+        # 现价保留 4 位（与库内 NUMERIC(14,4) 同精度）：ETF 常见 3 位小数（4.058），
+        # 截成 2 位会让前端 marketValue = 4.06 × 4000 多算 8 元，与后端对不上。
+        current_price=round(current_price, 4),
         total_cost=total_cost,
         market_value=market_value,
         profit_amount=profit_amount,
@@ -109,18 +112,28 @@ def _float_or_none(value: Any) -> float | None:
 # 「已落袋」两列：COALESCE 写入 —— 前端未带字段（None）时保留库中原值，显式 0 才清零。
 _LANDED_COLUMNS = ("realized_profit", "dividend_amount")
 
+# 整表覆盖时「前端不带有效值就保留库中原值」的列。
+# sector 也在此列：占位符 '-' 会被清洗成 None，若直接写 excluded 会把库里已有的真实板块清空。
+_COALESCE_COLUMNS = (*_LANDED_COLUMNS, "sector")
+
 
 def _conflict_set_map(
     statement: Any, table: Any, *, touch_updated_at: bool = False
 ) -> dict[str, Any]:
-    """构造 ON CONFLICT DO UPDATE 的 set_ 映射（不含 id/code/created_at/updated_at）。"""
-    names = [
-        c.name for c in table.columns if c.name not in {"id", "code", "created_at", "updated_at"}
-    ]
+    """构造 ON CONFLICT DO UPDATE 的 set_ 映射。
+
+    排除 id/code/created_at/updated_at，外加 **position_ratio**：
+    该列是派生值，`_position_row()` 从不产出，若留在这里会写成
+    `excluded.position_ratio`（INSERT 列表没有该列 → 默认值 NULL），
+    导致每次整表保存都把全表仓位占比清空。统一由 `recalc_position_ratios()` 在
+    upsert 之后按市值口径重算。
+    """
+    skip = {"id", "code", "created_at", "updated_at", "position_ratio"}
+    names = [c.name for c in table.columns if c.name not in skip]
     set_map: dict[str, Any] = {
         name: (
             func.coalesce(statement.excluded[name], table.c[name])
-            if name in _LANDED_COLUMNS
+            if name in _COALESCE_COLUMNS
             else statement.excluded[name]
         )
         for name in names
@@ -251,8 +264,10 @@ def _parse_date(value: Any) -> date | None:
 @router.get("/portfolio", response_model=list[PositionOut], summary="持仓列表")
 async def list_positions(db: AsyncSession = Depends(get_db)) -> list[PositionOut]:
     rows = (await db.scalars(select(Position).order_by(Position.id))).all()
+    # 分母与逐只 market_value 同口径（都先 ROUND 到分再加总），
+    # 保证 Σposition_ratio 精确等于 100%，且与前端 Σrow.marketValue 完全一致。
     total_market_value = sum(
-        float(row.current_price or 0) * int(row.shares or 0) for row in rows
+        round(float(row.current_price or 0) * int(row.shares or 0), 2) for row in rows
     )
     return [_position_to_out(row, total_market_value) for row in rows]
 
@@ -310,6 +325,9 @@ async def replace_positions(
         set_=_conflict_set_map(statement, table),
     )
     await db.execute(statement)
+    # 整表覆盖后必须重算仓位占比：position_ratio 是派生列，不在 upsert 的 SET 里
+    # （否则新插入行为 NULL、已有行停在旧值），这里复用 PATCH 的同一套市值口径。
+    await recalc_position_ratios(db)
     await db.commit()
 
     # 同步股票主数据，保证筛选页能搜到持仓标的（含 ETF）
@@ -337,13 +355,16 @@ async def upsert_position(
         set_=_conflict_set_map(statement, table, touch_updated_at=True),
     )
     await db.execute(statement)
+    # 新增/改单会改变总市值，仓位占比需全表重算（同一套口径，见 position_metrics）
+    await recalc_position_ratios(db)
     await db.commit()
 
     saved = await db.scalar(select(Position).where(Position.code == row["code"]))
     if saved is None:
         raise HTTPException(status_code=500, detail="持仓写入失败")
-    total = await db.scalar(
-        select(func.coalesce(func.sum(Position.shares * Position.current_price), 0))
+    total = sum(
+        round(float(r.current_price or 0) * int(r.shares or 0), 2)
+        for r in (await db.scalars(select(Position))).all()
     )
     await _sync_stocks_from_positions(db, [row])
     # 新股票自动入驻：异步拉日线 + 财报体检，不阻塞响应
@@ -441,21 +462,11 @@ async def patch_position(
     position.updated_at = datetime.now(timezone.utc)
     await db.flush()
 
-    total = float(
-        await db.scalar(
-            select(func.coalesce(func.sum(Position.shares * Position.current_price), 0))
-        )
-        or 0
-    )
-    # 仓位占比是全表派生值：批量重算，但不触碰其他行的 updated_at
-    await db.execute(
-        update(Position)
-        .values(
-            position_ratio=func.round(
-                (Position.shares * Position.current_price) * 100 / func.nullif(total, 0), 4
-            )
-        )
-        .execution_options(synchronize_session=False)
+    # 仓位占比是全表派生值：批量重算（与其他写入口共用同一套口径），不触碰其他行 updated_at
+    await recalc_position_ratios(db)
+    total = sum(
+        round(float(r.current_price or 0) * int(r.shares or 0), 2)
+        for r in (await db.scalars(select(Position))).all()
     )
     await db.commit()
     await db.refresh(position)
@@ -633,8 +644,20 @@ async def delete_position(
     )
 
 
+_FUND_CODE_PREFIXES = ("51", "15", "56", "58")
+
+
+def _is_fund_code(code: str) -> bool:
+    """ETF/LOF 代码段（51/15/56/58 开头）。"""
+    return str(code or "")[:2] in _FUND_CODE_PREFIXES
+
+
 async def _sync_stocks_from_positions(db: AsyncSession, rows: list[dict[str, Any]]) -> None:
-    """把持仓的行业/估值指标补进 stocks（只补空值，不覆盖已有主数据）。"""
+    """把持仓的行业/估值指标补进 stocks。
+
+    注意：行业字段对 **ETF 一律不回写** —— 持仓里的「宽基ETF / 黄金 / 白酒」是组合口径的
+    自定义板块，写进 stocks.industry 会污染全市场行业筛选。
+    """
     from app.models import Stock
 
     values = []
@@ -644,7 +667,9 @@ async def _sync_stocks_from_positions(db: AsyncSession, rows: list[dict[str, Any
             {
                 "code": row["code"],
                 "name": row["name"],
-                "industry": clean_industry_or_none(row.get("sector")),
+                "industry": (
+                    None if _is_fund_code(row["code"]) else clean_industry_or_none(row.get("sector"))
+                ),
                 "pe_ttm": extra.get("pe"),
                 "pb": extra.get("pb"),
                 "roe": extra.get("roe"),

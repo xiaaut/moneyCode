@@ -24,6 +24,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db.session import AsyncSessionLocal
 from app.models import Position, Stock, SystemMeta
 from app.services import akshare_sync, fund_flow, kline_sync, onboarding
+from app.services.position_metrics import recalc_position_ratios
 from app.services.quotes import quote_service
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,9 @@ async def _step_positions() -> str:
             )
             updated += 1
 
+        # 现价变了 → 仓位占比必须跟着重算（与 PATCH/POST 同一套口径），否则该列会停在旧值
+        await session.flush()
+        await recalc_position_ratios(session)
         await session.commit()
         return f"刷新 {updated}/{len(positions)} 只持仓现价"
 

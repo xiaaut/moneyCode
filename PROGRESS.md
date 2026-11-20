@@ -83,6 +83,7 @@ my-finance-system/
 │       │   ├── financial_analysis.py # 张新民财报分析（核心指标 + 六大雷区 + 健康分）
 │       │   ├── rebalance_service.py  # 四维联动调仓雷达（持仓/自选/K线/财报聚合 + 信号 + 工单 CRUD）
 │       │   ├── onboarding.py         # 新增股票自动入驻（日线 + 财报三表体检，挂新增持仓/自选钩子）
+│       │   ├── position_metrics.py   # 持仓派生指标统一计算（position_ratio 全表重算，四个写入口共用）
 │       │   └── jobs.py               # 后台任务（国企扫描 / MSCI 分析）+ JobState
 │       └── api/v1/
 │           ├── router.py             # 路由聚合
@@ -158,6 +159,8 @@ my-finance-system/
 > 市值/盈亏/占比为按现价的快照值；同一代码多条持仓在迁移时按股数加权合并成本。
 >
 > **已落袋两列（2026-11-19 新增）**：`realized_profit` = 做T已实现盈亏（同花顺「实现盈亏」）、`dividend_amount` = 累计现金分红（同花顺「分红收益」）。**只服务前端附属行的「实际持仓还原」展示，不进入主行/汇总行任何计算**。两列为 nullable + `DEFAULT 0`：整数组覆盖 `POST /api/portfolio` 不带这两个字段时，服务端用 `COALESCE(excluded, 原值)` 保留库中数据，只有显式传 `0` 才清零。
+>
+> **`position_ratio` 是纯派生列（2026-11-20 统一）**：口径唯一 —— `单只市值(ROUND(shares×current_price,2)) ÷ Σ单只市值 × 100`，由 `app/services/position_metrics.py::recalc_position_ratios()` 在四个写入口（整表覆盖 / 新增改单 / PATCH / 收盘刷新现价）后统一重算。`ON CONFLICT` 的 SET 里**不含**该列（历史 bug：`excluded.position_ratio` 恒为 NULL，整表保存会把全表占比清空）。
 >
 > **updated_at 隔离铁律**：仅用户主动「新增持仓 `POST /api/portfolio/positions` / 修改持仓 `PUT /api/portfolio/positions/{code}`」时刷新为当前时间；后台「刷新现价 / 刷新 ROE / 收盘一键更新」只更新 stocks/kline/financials，**严禁触碰 positions.updated_at**（模型已移除 `onupdate`，整数组覆盖 `POST /api/portfolio` 也不更新该字段）。存量记录由 `migrate_positions_updated_at.py` 统一锚定为 `2026-01-01 00:00:00+08`，便于区分「尚未整理」。
 
@@ -238,7 +241,7 @@ my-finance-system/
 | POST | `/api/portfolio` | 整数组覆盖持仓（按 code upsert + **删除未提交的 code**；已落袋两列缺省时 COALESCE 保留原值；带**防误删熔断**，见下） |
 | POST | `/api/portfolio/positions` | 新增/修改单条持仓（刷新 updated_at，异步触发 auto_onboard_stock） |
 | PUT | `/api/portfolio/positions/{code}` | 按代码整行修改持仓（刷新 updated_at，兼容旧调用） |
-| **PATCH** | **`/api/portfolio/{code}`** | **按代码局部更新（只 UPDATE 单行、绝无 DELETE）：只写入本次提交的字段，其余保持原值；自动重算市值/盈亏/盈亏率/仓位占比并刷新 updated_at** |
+| **PATCH** | **`/api/portfolio/{code}`** | **按代码局部更新（只 UPDATE 单行、绝无 DELETE）：只写入本次提交的字段（含 `sector` 板块、`currentPrice`），其余保持原值；自动重算市值/盈亏/盈亏率/仓位占比并刷新 updated_at** |
 | DELETE | `/api/portfolio/{code}` | 删除持仓（`archive=true` 时写入 trade_history） |
 | GET | `/api/portfolio/positions/{code}/dividend-preview` | 分红除权成本试算（`current_cost=`/`current_shares=` 可选，主通道同花顺 adjustment-factors + 东财 RPT_SHAREBONUS_DET 备用） |
 | GET | `/api/watchlist` | 观察列表 |
@@ -1134,3 +1137,62 @@ const ratioValid = actualCost > 0;
 
 > 测试全程只动了达仁堂一行，测完已用 `PATCH` 还原其 `realized_profit=2526.51 / dividend_amount=1821.00`，
 > 并把 `updated_at` 恢复为测试前的 `2026-11-18T17:39:42.360715+00:00`；未执行任何 `./dev.sh` 或 kill。
+
+## 16. 精度 / 板块 / 仓位占比一致性修复（2026-11-20）
+
+### 16.1 ETF 市值精度（前端不再截断现价）
+
+| 位置 | 修法 |
+|---|---|
+| `Positions.vue::recalcRow()` | 中间计算全部用原始精度 `currentPrice × quantity`，**只在赋值展示/落盘时** `toFixed(2)` |
+| `Positions.vue::getPriceFromQuoteItem(item, code)` | ETF/LOF（51/15/56/58）刷现价保留 **3 位**小数，个股仍 2 位 |
+| 后端 `_position_to_out()` | `current_price` 输出从 `round(…,2)` 改为 `round(…,4)`，与库内 `NUMERIC(14,4)` 同精度 |
+| 后端 `list_positions()` / PATCH / upsert | 分母统一为 `Σ ROUND(price×qty, 2)`，与逐只 `market_value` 同口径 |
+
+实测：`510300` 现价 `4.058 × 4000` → **API 市值 16232.00 = 前端单元格 16232.000**（修复前 4.06×4000=16240，差 8 元）。
+
+### 16.2 板块语义统一
+
+| 项 | 说明 |
+|---|---|
+| `app/utils/industry.py::clean_industry_or_none` | `'-' / '--' / '—' / '–' / '－' / 纯空白` 一律返回 `None`（新增 `_PLACEHOLDER_RE`），占位符不再入库 |
+| `holdingsImport.js` | 新增 `normalizeSectorText / resolveSector / isFundCode`：剥 `II·II·Ⅲ` 后缀、占位符归空；ETF 无行业时默认 `基金` |
+| `Positions.vue` | 新增 `normalizeSectorLabel()`：聚合与「板块」列展示统一口径（脏后缀/空值 → 未分类）；`sectorBreakdown`、`stockBreakdown`、板块列 formatter 全部走它 |
+| 编辑弹窗 | 新增「板块」输入框，`PATCH` payload 带 `sector`（留空 = `null` → 未分类），可给个股/ETF 设自定义板块 |
+| 刷现价补全 | 仅当本地板块为空时才用行情 f100 补，**不覆盖用户自定义板块** |
+| `_sync_stocks_from_positions` | ETF（51/15/56/58）不再回写 `stocks.industry`，避免「白酒 / 宽基ETF / 黄金」污染全市场行业筛选 |
+| 整表覆盖 `sector` | 纳入 `_COALESCE_COLUMNS`：占位符洗成 None 时保留库中原值，不会被整表保存清空 |
+
+**存量清洗**（本地库，单事务）：
+
+```sql
+UPDATE positions SET sector = trim(regexp_replace(trim(sector), '[[:space:]　]*[IⅠⅡⅢⅣV]+$', ''))
+WHERE sector ~ '[IⅠⅡⅢⅣV]+$';             -- 10 行：中药Ⅱ/白酒Ⅱ/旅游零售Ⅱ → 去后缀
+UPDATE positions SET sector='白酒'      WHERE code='512690';
+UPDATE positions SET sector='宽基ETF'   WHERE code='510300';
+UPDATE positions SET sector='黄金'      WHERE code='518880';
+```
+
+`updated_at` 的 md5 指纹改前改后完全一致（25 行 0 变化）。
+
+### 16.3 `position_ratio` 不再被整表保存清空
+
+- 新增 `app/services/position_metrics.py::recalc_position_ratios(db)`：唯一口径
+  `占比 = ROUND(shares×current_price, 2) ÷ ΣROUND(…,2) × 100`，落库 4 位小数。
+- `_conflict_set_map()` 把 `position_ratio` 从 upsert 的 SET 里**排除**（此前 `excluded.position_ratio` 恒为 NULL，每次整表保存都会清空全表）。
+- 四个写入口统一在写完后调用该函数：`replace_positions`（整表覆盖）、`upsert_position`（新增/改单）、`patch_position`（PATCH）、`daily_sync._step_positions`（收盘刷新现价，先 flush 再重算）。
+
+### 16.4 验收（2026-11-20）
+
+| 断言 | 结果 |
+|---|---|
+| `positions` 行数 | **25** |
+| 板块带 `II/Ⅱ` 后缀行数 | **0**（改前 10） |
+| 板块为 `'-'` 或 NULL 行数 | **0**（改前 1 行 `'-'`） |
+| `position_ratio IS NULL` 行数 | **0**（整表 POST 后仍为 0） |
+| 全量 POST 前后指纹（含 updatedAt/市值/占比/板块） | **完全一致**（`2b8536b3`），无副作用 |
+| POST 局部数组 | 仍 400 熔断 |
+| 板块分组 | 中药 **单组 9 只 26.99%**（改前裂成 9.71% + 17.27%）；白酒 3 只（含 512690）；宽基ETF 8.63%；黄金 0.40%；无 `-`/未分类分组 |
+| 汇总行 | 成本 `204418.29` / 市值 `188085.40` / 盈亏 `-16332.89` / 仓位 `100.00%`，与 API 合计一致 |
+| 510300 / 512690 市值 | 前后端均 `16232.00` / `8932.00`，无 2 位截断尾差 |
+| `npm run build` | 通过 |

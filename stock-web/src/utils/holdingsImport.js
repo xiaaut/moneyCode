@@ -11,6 +11,31 @@ const HEADER_ALIASES = {
 
 const SKIP_ROW = /^(合计|总计|汇总|总资产|总市值|总盈亏|小计)/;
 
+// ETF / LOF 代码段：51（沪市ETF）、15/56（深市/沪市基金）、58（科创ETF）
+export const FUND_CODE_PREFIXES = ['51', '15', '56', '58'];
+// 行业分级后缀（申万二级写法不统一）：II / III / Ⅱ / Ⅲ …
+const INDUSTRY_SUFFIX_RE = /[\s\u3000]*[IⅠⅡⅢⅣV]+$/;
+// 占位符：'-' / '--' / '—' / '–' / '－' / 纯空白
+const SECTOR_PLACEHOLDER_RE = /^[\s\u3000\-—–－_/]*$/;
+
+export function isFundCode(code) {
+  return FUND_CODE_PREFIXES.includes(String(code || '').trim().slice(0, 2));
+}
+
+/** 板块名清洗：剥后缀 + 占位符归空串（与后端 clean_industry_or_none 同口径） */
+export function normalizeSectorText(value) {
+  const text = String(value ?? '').trim();
+  if (!text || SECTOR_PLACEHOLDER_RE.test(text)) return '';
+  return text.replace(INDUSTRY_SUFFIX_RE, '').trim();
+}
+
+/** 新增/导入时的板块兜底：行业为空且是 ETF/LOF → '基金'，否则返回清洗后的原值 */
+export function resolveSector(code, rawSector) {
+  const cleaned = normalizeSectorText(rawSector);
+  if (cleaned) return cleaned;
+  return isFundCode(code) ? '基金' : '';
+}
+
 function normalizeCell(value) {
   return String(value ?? '')
     .replace(/[（(][^）)]*[）)]/g, '')
@@ -192,7 +217,7 @@ export function mergeHoldings(parsedRows, existing) {
       id: maxId,
       code: parsed.code,
       name: parsed.name || parsed.code,
-      sector: '-',
+      sector: resolveSector(parsed.code, ''),
       costPrice: parsed.costPrice,
       quantity: parsed.quantity,
       currentPrice: parsed.currentPrice && parsed.currentPrice > 0 ? parsed.currentPrice : 0,
